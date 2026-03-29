@@ -314,6 +314,39 @@ class TestDeepChain(unittest.TestCase):
         self.assertLess(result.index("def b"), result.index("def a"))
 
 
+class TestStarImportAllEdgeCases(unittest.TestCase):
+    def test_reexported_via_all_is_traced(self):
+        # __init__.py imports core_func from submodule and re-exports it via __all__
+        # currently FAILS — _expand_star_import only checks symbols, not import_map
+        graph = Parser().trace(fixture("reexport_user.py"), "uses_reexported")
+        self.assertIn("core_func", node_names(graph))
+
+    def test_reexported_node_points_to_original_file(self):
+        # core_func should trace back to core.py, not __init__.py
+        graph = Parser().trace(fixture("reexport_user.py"), "uses_reexported")
+        nodes = graph.nodes()
+        core_nodes = [n for n in nodes if n.endswith("::core_func")]
+        self.assertEqual(len(core_nodes), 1)
+        self.assertIn("core.py", core_nodes[0])
+
+    def test_concatenated_all_exports_traced(self):
+        # __all__ = ['func_one'] + ['func_two'] — concatenation should be resolved
+        # currently FAILS — _get_all_list only handles plain list literals
+        graph = Parser().trace(fixture("dynamic_all_user.py"), "uses_concatenated_all")
+        self.assertIn("func_two", node_names(graph))
+
+    def test_augmented_all_exports_traced(self):
+        # __all__ += ['func_three'] — augmented assignment should be picked up
+        # currently FAILS — _get_all_list does not handle AugAssign
+        graph = Parser().trace(fixture("dynamic_all_user.py"), "uses_augmented_all")
+        self.assertIn("func_three", node_names(graph))
+
+    def test_hidden_func_not_in_dynamic_all(self):
+        # func_hidden is not in __all__ so it should not be traced
+        graph = Parser().trace(fixture("dynamic_all_user.py"), "uses_hidden")
+        self.assertNotIn("func_hidden", node_names(graph))
+
+
 class TestStarImport(unittest.TestCase):
     def test_all_exported_function_traced(self):
         graph = Parser().trace(fixture("star_all_import.py"), "uses_exported")
@@ -335,6 +368,48 @@ class TestStarImport(unittest.TestCase):
         # This test currently FAILS — chained star imports are not resolved yet
         graph = Parser().trace(fixture("star_import.py"), "uses_chained_star_import")
         self.assertIn("deep_helper", node_names(graph))
+
+
+class TestPackageImport(unittest.TestCase):
+    def test_package_init_function_traced(self):
+        # `from mypackage import package_func` where mypackage is a directory
+        # currently FAILS — resolver builds mypackage.py instead of mypackage/__init__.py
+        graph = Parser().trace(fixture("package_import.py"), "uses_package")
+        self.assertIn("package_func", node_names(graph))
+
+    def test_package_init_node_has_correct_file(self):
+        # the traced node should point to mypackage/__init__.py not mypackage.py
+        graph = Parser().trace(fixture("package_import.py"), "uses_package")
+        nodes = graph.nodes()
+        package_nodes = [n for n in nodes if "mypackage" in n and n.endswith("::package_func")]
+        self.assertEqual(len(package_nodes), 1)
+        self.assertIn("__init__.py", package_nodes[0])
+
+
+class TestPlainImport(unittest.TestCase):
+    def test_plain_import_with_alias_traced(self):
+        # `import module as m; m.func()` — should trace func from module
+        # currently FAILS — plain imports not resolved
+        graph = Parser().trace(fixture("plain_import.py"), "uses_plain_import")
+        self.assertIn("shared_helper", node_names(graph))
+
+    def test_plain_import_dependency_has_correct_file(self):
+        graph = Parser().trace(fixture("plain_import.py"), "uses_plain_import")
+        nodes = graph.nodes()
+        dep_nodes = [n for n in nodes if "cross_file_b" in n and n.endswith("::shared_helper")]
+        self.assertEqual(len(dep_nodes), 1)
+
+
+class TestCircularStarImport(unittest.TestCase):
+    def test_circular_star_import_does_not_recurse(self):
+        # circular_a imports * from circular_b, which imports * from circular_a
+        graph = Parser().trace(fixture("circular_user.py"), "uses_circular")
+        self.assertIn("func_a", node_names(graph))
+
+    def test_circular_star_import_does_not_include_other_side(self):
+        # func_b lives in circular_b — it's reachable via *, but uses_circular doesn't call it
+        graph = Parser().trace(fixture("circular_user.py"), "uses_circular")
+        self.assertNotIn("func_b", node_names(graph))
 
 
 class TestExternalImports(unittest.TestCase):
