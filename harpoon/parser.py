@@ -68,7 +68,7 @@ class Parser:
         return symbols
 
     def _module_path_from_node(self, file_path: str, node) -> str:
-        """Compute the absolute file path for an ast.ImportFrom node."""
+        """Compute the absolute file path for an ast.ImportFrom node, with __init__.py fallback."""
         base_dir = os.path.dirname(os.path.abspath(file_path))
         module = node.module or ""
         level = node.level
@@ -76,21 +76,49 @@ class Parser:
             target_dir = base_dir
             for _ in range(level - 1):
                 target_dir = os.path.dirname(target_dir)
-            return os.path.join(target_dir, module.replace(".", os.sep) + ".py")
-        return os.path.join(os.getcwd(), module.replace(".", os.sep) + ".py")
+            path = os.path.join(target_dir, module.replace(".", os.sep) + ".py")
+        else:
+            path = os.path.join(os.getcwd(), module.replace(".", os.sep) + ".py")
+        if not os.path.isfile(path):
+            init_path = os.path.join(path[:-3], "__init__.py")
+            if os.path.isfile(init_path):
+                return init_path
+        return path
+
+    def _extract_string_list(self, node) -> list | None:
+        """Extract a flat list of strings from a list literal or concatenation of literals."""
+        if isinstance(node, (ast.List, ast.Tuple)):
+            result = []
+            for elt in node.elts:
+                if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                    result.append(elt.value)
+                else:
+                    return None
+            return result
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left = self._extract_string_list(node.left)
+            right = self._extract_string_list(node.right)
+            if left is not None and right is not None:
+                return left + right
+        return None
 
     def _get_all_list(self, tree) -> list | None:
-        """Return __all__ contents if defined, else None."""
+        """Return __all__ contents if defined, handling literals, concatenation, and += augmentation."""
+        all_names = None
         for node in tree.body:
             if isinstance(node, ast.Assign):
                 for target in node.targets:
                     if isinstance(target, ast.Name) and target.id == "__all__":
-                        if isinstance(node.value, (ast.List, ast.Tuple)):
-                            return [
-                                elt.value for elt in node.value.elts
-                                if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
-                            ]
-        return None
+                        names = self._extract_string_list(node.value)
+                        if names is not None:
+                            all_names = names
+            elif isinstance(node, ast.AugAssign):
+                if isinstance(node.target, ast.Name) and node.target.id == "__all__":
+                    if all_names is not None:
+                        names = self._extract_string_list(node.value)
+                        if names is not None:
+                            all_names.extend(names)
+        return all_names
 
     def _expand_star_import(self, module_path: str, lineno: int, visited: set = None) -> dict:
         """Recursively expand `from module import *` into individual name mappings."""
@@ -116,14 +144,19 @@ class Parser:
                         if self._is_project_file(sub_path):
                             result.update(self._expand_star_import(sub_path, lineno, visited))
 
-        # Collect this module's own symbols
+        # Collect this module's own symbols and imports
         all_names = self._get_all_list(tree)
         symbols = self._index_symbols(source, tree, module_path)
+        module_import_map = self._build_import_map(tree, module_path, star_visited=visited)
 
         if all_names is not None:
             for name in all_names:
                 if name in symbols:
                     result[name] = (module_path, name, lineno)
+                elif name in module_import_map:
+                    imp_path, imp_name, _ = module_import_map[name]
+                    if imp_name:
+                        result[name] = (imp_path, imp_name, lineno)
         else:
             for name in symbols:
                 if not name.startswith("_") and "." not in name:
@@ -131,20 +164,37 @@ class Parser:
 
         return result
 
-    def _resolve_import(self, file_path: str, node) -> dict:
+    def _resolve_import(self, file_path: str, node, star_visited: set = None) -> dict:
         result = {}
 
         if isinstance(node, ast.ImportFrom):
             module_path = self._module_path_from_node(file_path, node)
-
             if self._is_project_file(module_path):
                 for alias in node.names:
                     if alias.name == "*":
-                        result.update(self._expand_star_import(module_path, node.lineno))
+                        result.update(self._expand_star_import(module_path, node.lineno, visited=star_visited))
                     else:
                         original = alias.name
                         local = alias.asname or alias.name
                         result[local] = (module_path, original, node.lineno)
+
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                module_name = alias.name
+                local_name = alias.asname
+                if local_name is None:
+                    # dotted imports without alias (e.g. import a.b.c) bind only the
+                    # top-level name which requires chained attribute resolution — skip
+                    if "." in module_name:
+                        continue
+                    local_name = module_name
+                module_path = os.path.join(os.getcwd(), module_name.replace(".", os.sep) + ".py")
+                if not os.path.isfile(module_path):
+                    init_path = os.path.join(module_path[:-3], "__init__.py")
+                    if os.path.isfile(init_path):
+                        module_path = init_path
+                if self._is_project_file(module_path):
+                    result[local_name] = (module_path, None, node.lineno)  # None = whole module
 
         return result
 
@@ -155,12 +205,12 @@ class Parser:
         venv_markers = [".venv", "venv", "site-packages"]
         return not any(marker in abs_path for marker in venv_markers)
 
-    def _build_import_map(self, tree, file_path: str) -> dict:
+    def _build_import_map(self, tree, file_path: str, star_visited: set = None) -> dict:
         """Collect only top-level imports. Inline imports are scoped to their function."""
         import_map = {}
         for node in tree.body:
             if isinstance(node, (ast.Import, ast.ImportFrom)):
-                import_map.update(self._resolve_import(file_path, node))
+                import_map.update(self._resolve_import(file_path, node, star_visited=star_visited))
         return import_map
 
     def _collect_inline_imports(self, func_node, file_path: str) -> dict:
@@ -245,16 +295,20 @@ class Parser:
         class_prefix = parts[0] + "." if len(parts) > 1 else ""
 
         names = set()
+        module_attrs: dict[str, set] = {}  # {module_local_name: {called_attrs}}
+
         for child in ast.walk(node):
             if isinstance(child, ast.Call):
                 if isinstance(child.func, ast.Name):
                     names.add(child.func.id)
                 elif isinstance(child.func, ast.Attribute):
                     if isinstance(child.func.value, ast.Name):
-                        if child.func.value.id == "self":
+                        obj_name = child.func.value.id
+                        if obj_name == "self":
                             names.add(f"{class_prefix}{child.func.attr}")
                         else:
-                            names.add(child.func.value.id)
+                            names.add(obj_name)
+                            module_attrs.setdefault(obj_name, set()).add(child.func.attr)
             elif isinstance(child, ast.Name):
                 names.add(child.id)
 
@@ -271,11 +325,21 @@ class Parser:
                 if sym_lineno >= imp_lineno:
                     deps.append((symbols[name]["file_path"], name))
                 else:
-                    deps.append((import_map[name][0], import_map[name][1]))
+                    imp_path, imp_name, _ = import_map[name]
+                    if imp_name is None:
+                        for attr in module_attrs.get(name, []):
+                            deps.append((imp_path, attr))
+                    else:
+                        deps.append((imp_path, imp_name))
             elif in_symbols:
                 deps.append((symbols[name]["file_path"], name))
             elif in_imports:
-                deps.append((import_map[name][0], import_map[name][1]))
+                imp_path, imp_name, _ = import_map[name]
+                if imp_name is None:
+                    for attr in module_attrs.get(name, []):
+                        deps.append((imp_path, attr))
+                else:
+                    deps.append((imp_path, imp_name))
         return deps
 
     def trace(self, file_path: str, name: str) -> Graph:
