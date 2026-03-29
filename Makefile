@@ -10,5 +10,8 @@ test:
 build:
 	uv build
 
+serve:
+	uv run harpoon-mcp
+
 clean:
 	rm -rf dist/ .venv/ *.egg-info

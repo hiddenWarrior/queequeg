@@ -21,13 +21,16 @@ def main():
         "--mode",
         choices=["full", "minimal"],
         default="full",
-        help="For classes: include all methods (full) or only what is needed (minimal)",
+        help="For classes: include all methods (full) or only what is needed (minimal). TODO: full mode not yet implemented.",
     )
 
     args = parser.parse_args()
 
-    tracer = Parser()
-    graph = tracer.trace(args.file_path, args.name)
+    try:
+        graph = Parser().trace(args.file_path, args.name)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
     if args.output == "code":
         result = CodeSerializer().translate(graph)
