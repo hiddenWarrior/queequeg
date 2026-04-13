@@ -168,6 +168,25 @@ class Parser:
         result = {}
 
         if isinstance(node, ast.ImportFrom):
+            # `from . import X` — each alias is a submodule, not a name from a package
+            if node.level > 0 and not node.module:
+                base_dir = os.path.dirname(os.path.abspath(file_path))
+                target_dir = base_dir
+                for _ in range(node.level - 1):
+                    target_dir = os.path.dirname(target_dir)
+                for alias in node.names:
+                    if alias.name == "*":
+                        continue
+                    submod_path = os.path.join(target_dir, alias.name.replace(".", os.sep) + ".py")
+                    if not os.path.isfile(submod_path):
+                        init_path = os.path.join(submod_path[:-3], "__init__.py")
+                        if os.path.isfile(init_path):
+                            submod_path = init_path
+                    if self._is_project_file(submod_path):
+                        local = alias.asname or alias.name
+                        result[local] = (submod_path, None, node.lineno)
+                return result
+
             module_path = self._module_path_from_node(file_path, node)
             if self._is_project_file(module_path):
                 for alias in node.names:
@@ -205,16 +224,30 @@ class Parser:
         venv_markers = [".venv", "venv", "site-packages"]
         return not any(marker in abs_path for marker in venv_markers)
 
-    def _build_import_map(self, tree, file_path: str, star_visited: set = None) -> dict:
-        """Collect only top-level imports. Inline imports are scoped to their function."""
-        import_map = {}
-        for node in tree.body:
+    def _iter_module_imports(self, nodes):
+        """Yield import nodes from a statement list, descending into if/try but not functions/classes."""
+        for node in nodes:
             if isinstance(node, (ast.Import, ast.ImportFrom)):
-                import_map.update(self._resolve_import(file_path, node, star_visited=star_visited))
+                yield node
+            elif isinstance(node, ast.If):
+                yield from self._iter_module_imports(node.body)
+                yield from self._iter_module_imports(node.orelse)
+            elif isinstance(node, ast.Try):
+                yield from self._iter_module_imports(node.body)
+                for handler in node.handlers:
+                    yield from self._iter_module_imports(handler.body)
+                yield from self._iter_module_imports(node.orelse)
+                yield from self._iter_module_imports(node.finalbody)
+
+    def _build_import_map(self, tree, file_path: str, star_visited: set = None) -> dict:
+        """Collect top-level imports including those inside if/try blocks. Inline imports are scoped to their function."""
+        import_map = {}
+        for node in self._iter_module_imports(tree.body):
+            import_map.update(self._resolve_import(file_path, node, star_visited=star_visited))
         return import_map
 
     def _collect_inline_imports(self, func_node, file_path: str) -> dict:
-        """Collect imports declared inside a specific function body."""
+        """Collect all imports inside a function body, including inside nested functions."""
         inline = {}
         for child in ast.walk(func_node):
             if child is func_node:
@@ -222,6 +255,48 @@ class Parser:
             if isinstance(child, (ast.Import, ast.ImportFrom)):
                 inline.update(self._resolve_import(file_path, child))
         return inline
+
+    def _collect_direct_imports(self, func_node, file_path: str) -> dict:
+        """Collect imports declared directly in this function scope (not in nested functions)."""
+        direct = {}
+        for child in self._walk_current_scope(func_node):
+            if isinstance(child, (ast.Import, ast.ImportFrom)):
+                direct.update(self._resolve_import(file_path, child))
+        return direct
+
+    def _collect_dynamic_imports(self, func_node, file_path: str) -> dict:
+        """Detect importlib.import_module("literal") and import_module("literal") assignments."""
+        result = {}
+        for child in self._walk_current_scope(func_node):
+            if not isinstance(child, ast.Assign):
+                continue
+            if len(child.targets) != 1 or not isinstance(child.targets[0], ast.Name):
+                continue
+            call = child.value
+            if not isinstance(call, ast.Call) or not call.args:
+                continue
+            if not (isinstance(call.args[0], ast.Constant) and isinstance(call.args[0].value, str)):
+                continue
+            is_importlib = (
+                (isinstance(call.func, ast.Attribute)
+                 and call.func.attr == 'import_module'
+                 and isinstance(call.func.value, ast.Name)
+                 and call.func.value.id == 'importlib')
+                or
+                (isinstance(call.func, ast.Name) and call.func.id == 'import_module')
+            )
+            if not is_importlib:
+                continue
+            local_name = child.targets[0].id
+            module_str = call.args[0].value
+            module_path = os.path.join(os.getcwd(), module_str.replace(".", os.sep) + ".py")
+            if not os.path.isfile(module_path):
+                init_path = os.path.join(module_path[:-3], "__init__.py")
+                if os.path.isfile(init_path):
+                    module_path = init_path
+            if self._is_project_file(module_path):
+                result[local_name] = (module_path, None, child.lineno)
+        return result
 
     def _walk_current_scope(self, node):
         """Yield child nodes without recursing into nested function/class bodies."""
@@ -258,12 +333,16 @@ class Parser:
                         for elt in target.elts:
                             if isinstance(elt, ast.Name):
                                 local_names.add(elt.id)
+                            elif isinstance(elt, ast.Starred) and isinstance(elt.value, ast.Name):
+                                local_names.add(elt.value.id)
             elif isinstance(child, ast.AnnAssign):
                 if isinstance(child.target, ast.Name):
                     local_names.add(child.target.id)
             elif isinstance(child, ast.AugAssign):
                 if isinstance(child.target, ast.Name):
                     local_names.add(child.target.id)
+            elif isinstance(child, ast.NamedExpr):
+                local_names.add(child.target.id)
             elif isinstance(child, (ast.For, ast.AsyncFor)):
                 if isinstance(child.target, ast.Name):
                     local_names.add(child.target.id)
@@ -271,6 +350,8 @@ class Parser:
                     for elt in child.target.elts:
                         if isinstance(elt, ast.Name):
                             local_names.add(elt.id)
+                        elif isinstance(elt, ast.Starred) and isinstance(elt.value, ast.Name):
+                            local_names.add(elt.value.id)
             elif isinstance(child, ast.ExceptHandler):
                 if child.name:
                     local_names.add(child.name)
@@ -287,35 +368,112 @@ class Parser:
                             for elt in item.optional_vars.elts:
                                 if isinstance(elt, ast.Name):
                                     local_names.add(elt.id)
+            elif isinstance(child, ast.MatchAs):
+                if child.name:
+                    local_names.add(child.name)
+            elif isinstance(child, ast.MatchStar):
+                if child.name:
+                    local_names.add(child.name)
+            elif isinstance(child, ast.MatchMapping):
+                if child.rest:
+                    local_names.add(child.rest)
 
         return local_names - declared_global
 
-    def extract_dependencies(self, node, symbols: dict, import_map: dict, current_name: str) -> list:
+    def extract_dependencies(self, node, symbols: dict, import_map: dict, current_name: str, dynamic_imports: dict = None) -> list:
         parts = current_name.rsplit(".", 1)
         class_prefix = parts[0] + "." if len(parts) > 1 else ""
 
         names = set()
+        called_names = set()  # names that appear as a direct call target (for __init__ detection)
         module_attrs: dict[str, set] = {}  # {module_local_name: {called_attrs}}
 
-        for child in ast.walk(node):
-            if isinstance(child, ast.Call):
-                if isinstance(child.func, ast.Name):
-                    names.add(child.func.id)
-                elif isinstance(child.func, ast.Attribute):
-                    if isinstance(child.func.value, ast.Name):
-                        obj_name = child.func.value.id
-                        if obj_name == "self":
-                            names.add(f"{class_prefix}{child.func.attr}")
-                        else:
-                            names.add(obj_name)
-                            module_attrs.setdefault(obj_name, set()).add(child.func.attr)
-            elif isinstance(child, ast.Name):
-                names.add(child.id)
+        def _comp_target_names(tgt) -> set:
+            if isinstance(tgt, ast.Name):
+                return {tgt.id}
+            if isinstance(tgt, (ast.Tuple, ast.List)):
+                result = set()
+                for elt in tgt.elts:
+                    result |= _comp_target_names(elt)
+                return result
+            return set()
+
+        def collect(n, shadowed: set):
+            for child in ast.iter_child_nodes(n):
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    fn_params = {a.arg for a in child.args.args + child.args.posonlyargs + child.args.kwonlyargs}
+                    if child.args.vararg:
+                        fn_params.add(child.args.vararg.arg)
+                    if child.args.kwarg:
+                        fn_params.add(child.args.kwarg.arg)
+                    collect(child, shadowed | fn_params)
+                elif isinstance(child, ast.Lambda):
+                    lam_params = {a.arg for a in child.args.args + child.args.posonlyargs + child.args.kwonlyargs}
+                    if child.args.vararg:
+                        lam_params.add(child.args.vararg.arg)
+                    if child.args.kwarg:
+                        lam_params.add(child.args.kwarg.arg)
+                    collect(child, shadowed | lam_params)
+                elif isinstance(child, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+                    comp_vars = set()
+                    for gen in child.generators:
+                        comp_vars |= _comp_target_names(gen.target)
+                    collect(child, shadowed | comp_vars)
+                elif isinstance(child, ast.Call):
+                    if isinstance(child.func, ast.Name):
+                        func_name = child.func.id
+                        if func_name not in shadowed:
+                            if (func_name == 'getattr'
+                                    and len(child.args) >= 2
+                                    and isinstance(child.args[1], ast.Constant)
+                                    and isinstance(child.args[1].value, str)):
+                                obj_node = child.args[0]
+                                attr_name = child.args[1].value
+                                if isinstance(obj_node, ast.Name) and obj_node.id not in shadowed:
+                                    if obj_node.id in ('self', 'cls') and class_prefix:
+                                        names.add(f"{class_prefix}{attr_name}")
+                                    else:
+                                        names.add(obj_node.id)
+                                        module_attrs.setdefault(obj_node.id, set()).add(attr_name)
+                            else:
+                                names.add(func_name)
+                                called_names.add(func_name)
+                    elif isinstance(child.func, ast.Attribute):
+                        if isinstance(child.func.value, ast.Name):
+                            obj_name = child.func.value.id
+                            if obj_name not in shadowed:
+                                if obj_name in ("self", "cls") and class_prefix:
+                                    names.add(f"{class_prefix}{child.func.attr}")
+                                else:
+                                    names.add(obj_name)
+                                    module_attrs.setdefault(obj_name, set()).add(child.func.attr)
+                        elif (isinstance(child.func.value, ast.Call)
+                              and isinstance(child.func.value.func, ast.Name)
+                              and child.func.value.func.id == 'super'
+                              and class_prefix):
+                            method_name = child.func.attr
+                            class_name = class_prefix.rstrip('.')
+                            if class_name in symbols:
+                                for base in symbols[class_name]['node'].bases:
+                                    if isinstance(base, ast.Name):
+                                        names.add(f"{base.id}.{method_name}")
+                    collect(child, shadowed)
+                elif isinstance(child, ast.Name):
+                    if child.id not in shadowed:
+                        names.add(child.id)
+                else:
+                    collect(child, shadowed)
+
+        collect(node, set())
 
         names.discard(current_name)
-        names -= self._get_local_names(node)
+        local_names = self._get_local_names(node)
+        if dynamic_imports:
+            local_names -= set(dynamic_imports)
+        names -= local_names
 
         deps = []
+        constructor_import_set = set()  # (imp_path, imp_name) for import calls that may be constructors
         for name in names:
             in_symbols = name in symbols
             in_imports = name in import_map
@@ -333,6 +491,10 @@ class Parser:
                         deps.append((imp_path, imp_name))
             elif in_symbols:
                 deps.append((symbols[name]["file_path"], name))
+                if name in called_names and symbols[name]["type"] == "class":
+                    init_name = f"{name}.__init__"
+                    if init_name in symbols:
+                        deps.append((symbols[name]["file_path"], init_name))
             elif in_imports:
                 imp_path, imp_name, _ = import_map[name]
                 if imp_name is None:
@@ -340,7 +502,9 @@ class Parser:
                         deps.append((imp_path, attr))
                 else:
                     deps.append((imp_path, imp_name))
-        return deps
+                    if name in called_names:
+                        constructor_import_set.add((imp_path, imp_name))
+        return deps, constructor_import_set
 
     def trace(self, file_path: str, name: str) -> Graph:
         file_path = os.path.abspath(file_path)
@@ -398,9 +562,11 @@ class Parser:
         if not trace_deps:
             return
 
-        inline_imports = self._collect_inline_imports(symbol["node"], file_path)
-        effective_import_map = {**import_map, **inline_imports}
-        deps = self.extract_dependencies(symbol["node"], symbols, effective_import_map, name)
+        all_inline = self._collect_inline_imports(symbol["node"], file_path)
+        direct_inline = self._collect_direct_imports(symbol["node"], file_path)
+        dynamic_imports = self._collect_dynamic_imports(symbol["node"], file_path)
+        effective_import_map = {**all_inline, **import_map, **direct_inline, **dynamic_imports}
+        deps, constructor_import_set = self.extract_dependencies(symbol["node"], symbols, effective_import_map, name, dynamic_imports=dynamic_imports)
 
         # Propagate external deps up the ancestor chain for correct topological ordering
         self._propagate_deps_to_ancestors(name, file_path, deps, symbols, graph)
@@ -409,6 +575,13 @@ class Parser:
             dep_id = f"{dep_file}::{dep_name}"
             graph.add_edge(node_id, dep_id)
             self._trace_recursive(dep_file, dep_name, graph, visited, file_cache)
+            if (dep_file, dep_name) in constructor_import_set:
+                if dep_file in file_cache:
+                    init_name = f"{dep_name}.__init__"
+                    if init_name in file_cache[dep_file]["symbols"]:
+                        init_id = f"{dep_file}::{init_name}"
+                        graph.add_edge(node_id, init_id)
+                        self._trace_recursive(dep_file, init_name, graph, visited, file_cache)
 
     def _propagate_deps_to_ancestors(self, name: str, file_path: str, deps: list, symbols: dict, graph: Graph):
         """Add edges from each ancestor class to external deps so ordering is correct."""
