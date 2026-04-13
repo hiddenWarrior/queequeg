@@ -818,5 +818,64 @@ class TestExternalImports(unittest.TestCase):
         self.assertIn("uses_external", node_names(graph))
 
 
+class TestMultiInheritSuper(unittest.TestCase):
+    def test_super_traces_all_base_methods(self):
+        # C(A, B).compute calls super().compute() — should trace both A.compute and B.compute
+        graph = Parser().trace(fixture("multi_inherit_super.py"), "C.compute")
+        names = node_names(graph)
+        self.assertIn("A.compute", names)
+        self.assertIn("B.compute", names)
+
+    def test_super_multi_inherit_traces_base_deps(self):
+        # A.compute calls helper_a, B.compute calls helper_b — both appear transitively
+        graph = Parser().trace(fixture("multi_inherit_super.py"), "C.compute")
+        names = node_names(graph)
+        self.assertIn("helper_a", names)
+        self.assertIn("helper_b", names)
+
+
+class TestTypeAnnotationDep(unittest.TestCase):
+    def test_param_annotation_is_dep(self):
+        # def foo(x: MyModel) — MyModel referenced in annotation, IS a dep
+        graph = Parser().trace(fixture("type_annotation_dep.py"), "annotated_param")
+        self.assertIn("MyModel", node_names(graph))
+
+    def test_return_annotation_is_dep(self):
+        # def foo() -> MyModel — MyModel referenced in return annotation, IS a dep
+        graph = Parser().trace(fixture("type_annotation_dep.py"), "annotated_return")
+        self.assertIn("MyModel", node_names(graph))
+
+
+class TestAsyncShadow(unittest.TestCase):
+    def test_async_for_loop_var_not_traced(self):
+        # async for shared_helper in ... — loop var shadows the import, NOT a dep
+        graph = Parser().trace(fixture("async_shadow.py"), "async_for_shadow")
+        self.assertNotIn("shared_helper", node_names(graph))
+
+    def test_async_with_var_not_traced(self):
+        # async with ... as shared_helper — context var shadows the import, NOT a dep
+        graph = Parser().trace(fixture("async_shadow.py"), "async_with_shadow")
+        self.assertNotIn("shared_helper", node_names(graph))
+
+
+class TestNoInitConstructor(unittest.TestCase):
+    def test_constructor_no_init_does_not_add_init_dep(self):
+        # NoInit() — class has no __init__, should NOT add NoInit.__init__ to graph
+        graph = Parser().trace(fixture("no_init_class.py"), "creates_no_init")
+        self.assertNotIn("NoInit.__init__", node_names(graph))
+
+    def test_constructor_no_init_class_still_traced(self):
+        # NoInit is still instantiated — the class node IS in graph
+        graph = Parser().trace(fixture("no_init_class.py"), "creates_no_init")
+        self.assertIn("NoInit", node_names(graph))
+
+
+class TestRelativeSubmoduleDirectImport(unittest.TestCase):
+    def test_from_dot_submodule_import_func_traces_dep(self):
+        # from .utils import util_func — relative import with explicit module name
+        graph = Parser().trace(fixture("relpkg/direct_user.py"), "uses_direct_relative_import")
+        self.assertIn("util_func", node_names(graph))
+
+
 if __name__ == "__main__":
     unittest.main()
