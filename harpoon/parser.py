@@ -200,13 +200,9 @@ class Parser:
         elif isinstance(node, ast.Import):
             for alias in node.names:
                 module_name = alias.name
-                local_name = alias.asname
-                if local_name is None:
-                    # dotted imports without alias (e.g. import a.b.c) bind only the
-                    # top-level name which requires chained attribute resolution — skip
-                    if "." in module_name:
-                        continue
-                    local_name = module_name
+                # For dotted imports without alias (e.g. import a.b.c), use the full
+                # dotted name as the key so chained call sites (a.b.c.func()) can resolve it.
+                local_name = alias.asname if alias.asname else module_name
                 module_path = os.path.join(os.getcwd(), module_name.replace(".", os.sep) + ".py")
                 if not os.path.isfile(module_path):
                     init_path = os.path.join(module_path[:-3], "__init__.py")
@@ -388,6 +384,16 @@ class Parser:
         called_names = set()  # names that appear as a direct call target (for __init__ detection)
         module_attrs: dict[str, set] = {}  # {module_local_name: {called_attrs}}
 
+        def _dotted_name_from_attr(node) -> str | None:
+            """Recursively extract a dotted name string from a nested Attribute/Name chain."""
+            if isinstance(node, ast.Name):
+                return node.id
+            if isinstance(node, ast.Attribute):
+                prefix = _dotted_name_from_attr(node.value)
+                if prefix is not None:
+                    return f"{prefix}.{node.attr}"
+            return None
+
         def _comp_target_names(tgt) -> set:
             if isinstance(tgt, ast.Name):
                 return {tgt.id}
@@ -447,6 +453,13 @@ class Parser:
                                 else:
                                     names.add(obj_name)
                                     module_attrs.setdefault(obj_name, set()).add(child.func.attr)
+                        elif isinstance(child.func.value, ast.Attribute):
+                            dotted = _dotted_name_from_attr(child.func.value)
+                            if dotted is not None:
+                                root = dotted.split(".")[0]
+                                if root not in shadowed:
+                                    names.add(dotted)
+                                    module_attrs.setdefault(dotted, set()).add(child.func.attr)
                         elif (isinstance(child.func.value, ast.Call)
                               and isinstance(child.func.value.func, ast.Name)
                               and child.func.value.func.id == 'super'
