@@ -538,10 +538,10 @@ class TestCrossFileConstructorInit(unittest.TestCase):
 
 
 class TestDynamicImportScope(unittest.TestCase):
-    def test_importlib_in_nested_function_not_outer_dep(self):
-        # importlib.import_module() inside inner() should NOT affect outer()'s deps
+    def test_importlib_in_nested_function_is_outer_dep(self):
+        # importlib.import_module() inside inner() — outer calls inner, so shared_helper IS a dep of outer
         graph = Parser().trace(fixture("importlib_nested.py"), "outer")
-        self.assertNotIn("shared_helper", node_names(graph))
+        self.assertIn("shared_helper", node_names(graph))
 
 
 class TestStarUnpack(unittest.TestCase):

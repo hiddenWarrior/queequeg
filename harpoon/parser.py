@@ -263,7 +263,7 @@ class Parser:
     def _collect_dynamic_imports(self, func_node, file_path: str) -> dict:
         """Detect importlib.import_module("literal") and import_module("literal") assignments."""
         result = {}
-        for child in self._walk_current_scope(func_node):
+        for child in ast.walk(func_node):
             if not isinstance(child, ast.Assign):
                 continue
             if len(child.targets) != 1 or not isinstance(child.targets[0], ast.Name):
