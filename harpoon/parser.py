@@ -471,6 +471,17 @@ class Parser:
                                     if isinstance(base, ast.Name):
                                         names.add(f"{base.id}.{method_name}")
                     collect(child, shadowed)
+                elif isinstance(child, ast.Attribute):
+                    if isinstance(child.value, ast.Name):
+                        obj_name = child.value.id
+                        if obj_name not in shadowed:
+                            if obj_name in ("self", "cls") and class_prefix:
+                                names.add(f"{class_prefix}{child.attr}")
+                            else:
+                                names.add(obj_name)
+                                module_attrs.setdefault(obj_name, set()).add(child.attr)
+                    else:
+                        collect(child, shadowed)
                 elif isinstance(child, ast.Name):
                     if child.id not in shadowed:
                         names.add(child.id)

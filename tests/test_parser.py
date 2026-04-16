@@ -55,13 +55,11 @@ class TestSimple(unittest.TestCase):
 
     def test_tuple_unpack_shadowing_not_a_dependency(self):
         # helper is bound via tuple unpack — should not be traced as module-level helper
-        # This test currently FAILS — tuple unpack targets not added to local_names yet
         graph = Parser().trace(fixture("simple.py"), "shadows_with_tuple_unpack")
         self.assertNotIn("helper", node_names(graph))
 
     def test_context_manager_variable_shadowing_not_a_dependency(self):
         # `with ... as helper` binds helper locally — should not be traced as module-level helper
-        # This test currently FAILS — with-statement targets not added to local_names yet
         graph = Parser().trace(fixture("simple.py"), "shadows_with_context_manager")
         self.assertNotIn("helper", node_names(graph))
 
@@ -80,7 +78,6 @@ class TestSimple(unittest.TestCase):
     def test_nonlocal_variable_not_traced_as_module_dependency(self):
         # outer_with_nonlocal assigns `helper` locally; inner uses `nonlocal helper`
         # the outer function's `helper` is local — should NOT trace module-level helper
-        # This test currently FAILS — nonlocal in nested function incorrectly bleeds into outer scope analysis
         graph = Parser().trace(fixture("simple.py"), "outer_with_nonlocal")
         self.assertNotIn("helper", node_names(graph))
 
@@ -185,7 +182,6 @@ class TestInlineImport(unittest.TestCase):
 
     def test_inline_import_in_sibling_does_not_affect_other_function(self):
         # uses_local_helper only uses the module-level helper(), not the inline import in its sibling
-        # This test currently FAILS — it documents a known scope-bleed bug
         graph = Parser().trace(fixture("inline_import_scope.py"), "uses_local_helper")
         nodes = graph.nodes()
         local_nodes = [n for n in nodes if "inline_import_scope" in n and n.endswith("::helper")]
@@ -317,7 +313,6 @@ class TestDeepChain(unittest.TestCase):
 class TestStarImportAllEdgeCases(unittest.TestCase):
     def test_reexported_via_all_is_traced(self):
         # __init__.py imports core_func from submodule and re-exports it via __all__
-        # currently FAILS — _expand_star_import only checks symbols, not import_map
         graph = Parser().trace(fixture("reexport_user.py"), "uses_reexported")
         self.assertIn("core_func", node_names(graph))
 
@@ -330,14 +325,12 @@ class TestStarImportAllEdgeCases(unittest.TestCase):
         self.assertIn("core.py", core_nodes[0])
 
     def test_concatenated_all_exports_traced(self):
-        # __all__ = ['func_one'] + ['func_two'] — concatenation should be resolved
-        # currently FAILS — _get_all_list only handles plain list literals
+        # __all__ = ['func_one'] + ['func_two'] — concatenation is resolved
         graph = Parser().trace(fixture("dynamic_all_user.py"), "uses_concatenated_all")
         self.assertIn("func_two", node_names(graph))
 
     def test_augmented_all_exports_traced(self):
-        # __all__ += ['func_three'] — augmented assignment should be picked up
-        # currently FAILS — _get_all_list does not handle AugAssign
+        # __all__ += ['func_three'] — augmented assignment is picked up
         graph = Parser().trace(fixture("dynamic_all_user.py"), "uses_augmented_all")
         self.assertIn("func_three", node_names(graph))
 
@@ -359,13 +352,11 @@ class TestStarImport(unittest.TestCase):
 
     def test_star_import_dependency_traced(self):
         # shared_helper comes from `from cross_file_b import *` — should be traced
-        # This test currently FAILS — star imports are not resolved yet
         graph = Parser().trace(fixture("star_import.py"), "uses_star_import")
         self.assertIn("shared_helper", node_names(graph))
 
     def test_chained_star_import_dependency_traced(self):
         # deep_helper lives in star_file_c, re-exported by star_file_b via *, then star-imported here
-        # This test currently FAILS — chained star imports are not resolved yet
         graph = Parser().trace(fixture("star_import.py"), "uses_chained_star_import")
         self.assertIn("deep_helper", node_names(graph))
 
@@ -373,7 +364,6 @@ class TestStarImport(unittest.TestCase):
 class TestPackageImport(unittest.TestCase):
     def test_package_init_function_traced(self):
         # `from mypackage import package_func` where mypackage is a directory
-        # currently FAILS — resolver builds mypackage.py instead of mypackage/__init__.py
         graph = Parser().trace(fixture("package_import.py"), "uses_package")
         self.assertIn("package_func", node_names(graph))
 
@@ -389,7 +379,6 @@ class TestPackageImport(unittest.TestCase):
 class TestPlainImport(unittest.TestCase):
     def test_plain_import_with_alias_traced(self):
         # `import module as m; m.func()` — should trace func from module
-        # currently FAILS — plain imports not resolved
         graph = Parser().trace(fixture("plain_import.py"), "uses_plain_import")
         self.assertIn("shared_helper", node_names(graph))
 
@@ -799,9 +788,7 @@ class TestChainedAttrAccess(unittest.TestCase):
         self.assertIn("shared_helper", node_names(graph))
 
     def test_plain_import_no_alias_chained_not_traced(self):
-        # import a.b.c; a.b.c.func() — deeply chained, currently not resolved
-        # known gap: only single-level obj.attr() is tracked
-        # currently FAILS
+        # import a.b.c; a.b.c.func() — chained dotted access resolved via full module key
         graph = Parser().trace(fixture("plain_import.py"), "uses_plain_import_no_alias")
         self.assertIn("shared_helper", node_names(graph))
 
@@ -875,6 +862,57 @@ class TestRelativeSubmoduleDirectImport(unittest.TestCase):
         # from .utils import util_func — relative import with explicit module name
         graph = Parser().trace(fixture("relpkg/direct_user.py"), "uses_direct_relative_import")
         self.assertIn("util_func", node_names(graph))
+
+
+class TestCrossFileInheritance(unittest.TestCase):
+    def test_imported_base_class_is_dep(self):
+        # class Child(SharedClass) where SharedClass is imported — base class IS a dep
+        graph = Parser().trace(fixture("cross_file_child.py"), "Child")
+        self.assertIn("SharedClass", node_names(graph))
+
+    def test_imported_base_class_points_to_correct_file(self):
+        # SharedClass should trace back to cross_file_b, not cross_file_child
+        graph = Parser().trace(fixture("cross_file_child.py"), "Child")
+        nodes = graph.nodes()
+        base_nodes = [n for n in nodes if n.endswith("::SharedClass")]
+        self.assertEqual(len(base_nodes), 1)
+        self.assertIn("cross_file_b", base_nodes[0])
+
+
+class TestPropertyDep(unittest.TestCase):
+    def test_property_body_dep_traced(self):
+        # @property method body calls compute_price() — IS a dep
+        graph = Parser().trace(fixture("property_dep.py"), "Product.price")
+        self.assertIn("compute_price", node_names(graph))
+
+    def test_property_calling_sibling_property_traced(self):
+        # label uses self.price — Product.price IS a dep of Product.label
+        graph = Parser().trace(fixture("property_dep.py"), "Product.label")
+        self.assertIn("Product.price", node_names(graph))
+
+
+class TestInitDirectTrace(unittest.TestCase):
+    def test_init_traced_directly_as_entry_point(self):
+        # tracing MyService.__init__ directly — should work like any method
+        graph = Parser().trace(fixture("constructor_dep.py"), "MyService.__init__")
+        self.assertIn("MyService.__init__", node_names(graph))
+
+    def test_init_direct_trace_includes_its_deps(self):
+        # MyService.__init__ calls init_helper() — should be traced
+        graph = Parser().trace(fixture("constructor_dep.py"), "MyService.__init__")
+        self.assertIn("init_helper", node_names(graph))
+
+
+class TestStringAnnotation(unittest.TestCase):
+    def test_string_annotation_not_traced(self):
+        # def foo(x: "MyModel") — string annotation, NOT traced (known limitation)
+        graph = Parser().trace(fixture("string_annotation.py"), "uses_string_annotation")
+        self.assertNotIn("MyModel", node_names(graph))
+
+    def test_real_annotation_is_traced(self):
+        # def foo(x: MyModel) — direct name annotation IS traced
+        graph = Parser().trace(fixture("string_annotation.py"), "uses_real_annotation")
+        self.assertIn("MyModel", node_names(graph))
 
 
 if __name__ == "__main__":
