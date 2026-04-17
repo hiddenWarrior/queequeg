@@ -58,6 +58,31 @@ class TestCodeSerializer(unittest.TestCase):
         file_paths = {c.split("# file:")[-1].strip() for c in file_comments}
         self.assertGreater(len(file_paths), 1)
 
+    def test_same_file_symbols_under_one_file_comment(self):
+        # helper and uses_helper are both in simple.py — only one # file: comment for simple.py
+        graph = Parser().trace(fixture("simple.py"), "uses_helper")
+        result = CodeSerializer().translate(graph)
+        file_comments = [l for l in result.splitlines() if l.startswith("# file:")]
+        simple_comments = [c for c in file_comments if "simple.py" in c]
+        self.assertEqual(len(simple_comments), 1)
+
+    def test_file_comment_appears_once_per_file(self):
+        # deep_chain has 4 symbols all in one file — should have exactly one # file: comment
+        graph = Parser().trace(fixture("deep_chain.py"), "a")
+        result = CodeSerializer().translate(graph)
+        file_comments = [l for l in result.splitlines() if l.startswith("# file:")]
+        self.assertEqual(len(file_comments), 1)
+
+    def test_dependency_file_comment_before_dependent_file_comment(self):
+        # cross_file_b.py (dep) should have its file section before cross_file_a.py (dependent)
+        graph = Parser().trace(fixture("cross_file_a.py"), "uses_imported_function")
+        result = CodeSerializer().translate(graph)
+        lines = result.splitlines()
+        file_comments = [(i, l) for i, l in enumerate(lines) if l.startswith("# file:")]
+        self.assertEqual(len(file_comments), 2)
+        self.assertIn("cross_file_b", file_comments[0][1])
+        self.assertIn("cross_file_a", file_comments[1][1])
+
 
 class TestJsonSerializer(unittest.TestCase):
     def test_output_is_valid_json(self):
@@ -143,6 +168,21 @@ class TestCodeSerializerEdgeCases(unittest.TestCase):
             if line_a.startswith("# file:"):
                 self.assertFalse(line_b.startswith("# file:"), "two consecutive file comments with no code between them")
 
+    def test_all_symbols_from_same_file_grouped_together(self):
+        # deep_chain: a, b, c, d all in one file — all code must appear under a single file section
+        graph = Parser().trace(fixture("deep_chain.py"), "a")
+        result = CodeSerializer().translate(graph)
+        file_comment_pos = result.index("# file:")
+        # all function defs must appear after the single file comment
+        self.assertGreater(result.index("def d"), file_comment_pos)
+        self.assertGreater(result.index("def a"), file_comment_pos)
+
+    def test_symbols_within_file_section_in_dependency_order(self):
+        # within the single file section, d must appear before a
+        graph = Parser().trace(fixture("deep_chain.py"), "a")
+        result = CodeSerializer().translate(graph)
+        self.assertLess(result.index("def d"), result.index("def a"))
+
 
 class TestJsonSerializerEdgeCases(unittest.TestCase):
     def test_circular_dependency_is_valid_json(self):
@@ -180,8 +220,7 @@ class TestCodeSerializerFullOutput(unittest.TestCase):
             "# file: tests/fixtures/simple.py\n"
             "def helper():\n"
             '    return "i am a helper"\n'
-            "\n"
-            "# file: tests/fixtures/simple.py\n"
+            "\n\n"
             "def uses_helper():\n"
             "    return helper()"
         )
@@ -194,7 +233,7 @@ class TestCodeSerializerFullOutput(unittest.TestCase):
             "# file: tests/fixtures/cross_file_b.py\n"
             "def shared_helper():\n"
             '    return "i am from another file"\n'
-            "\n"
+            "\n\n"
             "# file: tests/fixtures/cross_file_a.py\n"
             "def uses_imported_function():\n"
             "    return shared_helper()"
@@ -208,8 +247,7 @@ class TestCodeSerializerFullOutput(unittest.TestCase):
             "# file: tests/fixtures/decorators.py\n"
             "def my_decorator(func):\n"
             "    return func\n"
-            "\n"
-            "# file: tests/fixtures/decorators.py\n"
+            "\n\n"
             "@my_decorator\n"
             "def single_decorated():\n"
             '    return "decorated once"'
@@ -223,16 +261,13 @@ class TestCodeSerializerFullOutput(unittest.TestCase):
             "# file: tests/fixtures/deep_chain.py\n"
             "def d():\n"
             '    return "end"\n'
-            "\n"
-            "# file: tests/fixtures/deep_chain.py\n"
+            "\n\n"
             "def c():\n"
             "    return d()\n"
-            "\n"
-            "# file: tests/fixtures/deep_chain.py\n"
+            "\n\n"
             "def b():\n"
             "    return c()\n"
-            "\n"
-            "# file: tests/fixtures/deep_chain.py\n"
+            "\n\n"
             "def a():\n"
             "    return b()"
         )
@@ -245,8 +280,7 @@ class TestCodeSerializerFullOutput(unittest.TestCase):
             "# file: tests/fixtures/async_func.py\n"
             "async def async_helper():\n"
             '    return "async"\n'
-            "\n"
-            "# file: tests/fixtures/async_func.py\n"
+            "\n\n"
             "async def async_uses_helper():\n"
             "    return await async_helper()"
         )
@@ -258,8 +292,7 @@ class TestCodeSerializerFullOutput(unittest.TestCase):
         expected = (
             "# file: tests/fixtures/simple.py\n"
             "MAX_SIZE = 100\n"
-            "\n"
-            "# file: tests/fixtures/simple.py\n"
+            "\n\n"
             "DEPENDENT_VAR = MAX_SIZE"
         )
         self.assertEqual(result, expected)
@@ -271,7 +304,7 @@ class TestCodeSerializerFullOutput(unittest.TestCase):
             "# file: tests/fixtures/star_all_source.py\n"
             "def exported_func():\n"
             '    return "exported"\n'
-            "\n"
+            "\n\n"
             "# file: tests/fixtures/star_all_import.py\n"
             "def uses_exported():\n"
             "    return exported_func()"
@@ -287,8 +320,7 @@ class TestCodeSerializerMethods(unittest.TestCase):
             "# file: tests/fixtures/classes.py\n"
             "def helper():\n"
             '    return "helper"\n'
-            "\n"
-            "# file: tests/fixtures/classes.py\n"
+            "\n\n"
             "class Animal:\n"
             '    sound = "generic"\n'
             "\n"
@@ -304,8 +336,7 @@ class TestCodeSerializerMethods(unittest.TestCase):
             "# file: tests/fixtures/classes.py\n"
             "def helper():\n"
             '    return "helper"\n'
-            "\n"
-            "# file: tests/fixtures/classes.py\n"
+            "\n\n"
             "class Dog(Animal):\n"
             '    name = "Rex"\n'
             "\n"
@@ -324,8 +355,7 @@ class TestCodeSerializerMethods(unittest.TestCase):
             "# file: tests/fixtures/classes.py\n"
             "def helper():\n"
             '    return "helper"\n'
-            "\n"
-            "# file: tests/fixtures/classes.py\n"
+            "\n\n"
             "class Outer:\n"
             "    class Inner:\n"
             "        value = 42\n"

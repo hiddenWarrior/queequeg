@@ -10,21 +10,37 @@ class CodeSerializer:
             for n in graph.nodes()
         }
 
-        chunks = []
+        # Collect (rel_path, code) in topological order (reversed = leaves first)
+        entries = []
         for node_id in reversed(ordered):
             node = graph.get_node(node_id)
             if not node.get("code"):
                 continue
             name = node.get("name", node_id.split("::")[-1])
 
-            # Skip if parent class is in the graph — it will be included in class reconstruction
+            # Skip if parent class is in the graph — included in class reconstruction
             if "." in name:
                 parent = ".".join(name.split(".")[:-1])
                 if parent in all_names:
                     continue
 
             rel_path = os.path.relpath(node["file_path"])
-            file_comment = f"# file: {rel_path}"
-            chunks.append(f"{file_comment}\n{node['code']}")
+            entries.append((rel_path, node["code"]))
 
-        return "\n\n".join(chunks)
+        # Group by file while preserving first-appearance order (topological)
+        file_order = []
+        file_codes = {}
+        for rel_path, code in entries:
+            if rel_path not in file_codes:
+                file_order.append(rel_path)
+                file_codes[rel_path] = []
+            file_codes[rel_path].append(code)
+
+        # One # file: header per file section; symbols separated by \n\n\n
+        sections = []
+        for rel_path in file_order:
+            codes = file_codes[rel_path]
+            section = f"# file: {rel_path}\n" + "\n\n\n".join(codes)
+            sections.append(section)
+
+        return "\n\n\n".join(sections)
