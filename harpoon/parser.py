@@ -2,6 +2,7 @@ import ast
 import os
 import logging
 from .graph import Graph
+from .import_resolver import ImportResolver
 
 logger = logging.getLogger(__name__)
 
@@ -67,213 +68,38 @@ class Parser:
         self._index_body(source, tree.body, file_path, symbols)
         return symbols
 
-    def _module_path_from_node(self, file_path: str, node) -> str:
-        """Compute the absolute file path for an ast.ImportFrom node, with __init__.py fallback."""
-        base_dir = os.path.dirname(os.path.abspath(file_path))
-        module = node.module or ""
-        level = node.level
-        if level > 0:
-            target_dir = base_dir
-            for _ in range(level - 1):
-                target_dir = os.path.dirname(target_dir)
-            path = os.path.join(target_dir, module.replace(".", os.sep) + ".py")
-        else:
-            path = os.path.join(os.getcwd(), module.replace(".", os.sep) + ".py")
-        if not os.path.isfile(path):
-            init_path = os.path.join(path[:-3], "__init__.py")
-            if os.path.isfile(init_path):
-                return init_path
-        return path
-
-    def _extract_string_list(self, node) -> list | None:
-        """Extract a flat list of strings from a list literal or concatenation of literals."""
-        if isinstance(node, (ast.List, ast.Tuple)):
-            result = []
-            for elt in node.elts:
-                if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
-                    result.append(elt.value)
-                else:
-                    return None
-            return result
-        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-            left = self._extract_string_list(node.left)
-            right = self._extract_string_list(node.right)
-            if left is not None and right is not None:
-                return left + right
-        return None
-
-    def _get_all_list(self, tree) -> list | None:
-        """Return __all__ contents if defined, handling literals, concatenation, and += augmentation."""
-        all_names = None
-        for node in tree.body:
-            if isinstance(node, ast.Assign):
-                for target in node.targets:
-                    if isinstance(target, ast.Name) and target.id == "__all__":
-                        names = self._extract_string_list(node.value)
-                        if names is not None:
-                            all_names = names
-            elif isinstance(node, ast.AugAssign):
-                if isinstance(node.target, ast.Name) and node.target.id == "__all__":
-                    if all_names is not None:
-                        names = self._extract_string_list(node.value)
-                        if names is not None:
-                            all_names.extend(names)
-        return all_names
-
-    def _expand_star_import(self, module_path: str, lineno: int, visited: set = None) -> dict:
-        """Recursively expand `from module import *` into individual name mappings."""
-        if visited is None:
-            visited = set()
-        if module_path in visited:
-            return {}
-        visited.add(module_path)
-
-        try:
-            source, tree = self._load(module_path)
-        except (FileNotFoundError, SyntaxError):
-            return {}
-
-        result = {}
-
-        # Recursively expand any star imports this module re-exports
-        for node in tree.body:
-            if isinstance(node, ast.ImportFrom):
-                for alias in node.names:
-                    if alias.name == "*":
-                        sub_path = self._module_path_from_node(module_path, node)
-                        if self._is_project_file(sub_path):
-                            result.update(self._expand_star_import(sub_path, lineno, visited))
-
-        # Collect this module's own symbols and imports
-        all_names = self._get_all_list(tree)
-        symbols = self._index_symbols(source, tree, module_path)
-        module_import_map = self._build_import_map(tree, module_path, star_visited=visited)
-
-        if all_names is not None:
-            for name in all_names:
-                if name in symbols:
-                    result[name] = (module_path, name, lineno)
-                elif name in module_import_map:
-                    imp_path, imp_name, _ = module_import_map[name]
-                    if imp_name:
-                        result[name] = (imp_path, imp_name, lineno)
-        else:
-            for name in symbols:
-                if not name.startswith("_") and "." not in name:
-                    result[name] = (module_path, name, lineno)
-
-        return result
-
-    def _resolve_import(self, file_path: str, node, star_visited: set = None) -> dict:
-        result = {}
-
-        if isinstance(node, ast.ImportFrom):
-            # `from . import X` — each alias is a submodule, not a name from a package
-            if node.level > 0 and not node.module:
-                base_dir = os.path.dirname(os.path.abspath(file_path))
-                target_dir = base_dir
-                for _ in range(node.level - 1):
-                    target_dir = os.path.dirname(target_dir)
-                for alias in node.names:
-                    if alias.name == "*":
-                        continue
-                    submod_path = os.path.join(target_dir, alias.name.replace(".", os.sep) + ".py")
-                    if not os.path.isfile(submod_path):
-                        init_path = os.path.join(submod_path[:-3], "__init__.py")
-                        if os.path.isfile(init_path):
-                            submod_path = init_path
-                    if self._is_project_file(submod_path):
-                        local = alias.asname or alias.name
-                        result[local] = (submod_path, None, node.lineno)
-                return result
-
-            module_path = self._module_path_from_node(file_path, node)
-            if self._is_project_file(module_path):
-                for alias in node.names:
-                    if alias.name == "*":
-                        result.update(self._expand_star_import(module_path, node.lineno, visited=star_visited))
-                    else:
-                        original = alias.name
-                        local = alias.asname or alias.name
-                        result[local] = (module_path, original, node.lineno)
-
-        elif isinstance(node, ast.Import):
-            for alias in node.names:
-                module_name = alias.name
-                # For dotted imports without alias (e.g. import a.b.c), use the full
-                # dotted name as the key so chained call sites (a.b.c.func()) can resolve it.
-                local_name = alias.asname if alias.asname else module_name
-                module_path = os.path.join(os.getcwd(), module_name.replace(".", os.sep) + ".py")
-                if not os.path.isfile(module_path):
-                    init_path = os.path.join(module_path[:-3], "__init__.py")
-                    if os.path.isfile(init_path):
-                        module_path = init_path
-                if self._is_project_file(module_path):
-                    result[local_name] = (module_path, None, node.lineno)  # None = whole module
-
-        return result
-
-    def _is_project_file(self, file_path: str) -> bool:
-        if not os.path.isfile(file_path):
-            return False
-        abs_path = os.path.abspath(file_path)
-        venv_markers = [".venv", "venv", "site-packages"]
-        return not any(marker in abs_path for marker in venv_markers)
-
-    def _iter_module_imports(self, nodes):
-        """Yield import nodes from a statement list, descending into if/try but not functions/classes."""
-        for node in nodes:
-            if isinstance(node, (ast.Import, ast.ImportFrom)):
-                yield node
-            elif isinstance(node, ast.If):
-                yield from self._iter_module_imports(node.body)
-                yield from self._iter_module_imports(node.orelse)
-            elif isinstance(node, ast.Try):
-                yield from self._iter_module_imports(node.body)
-                for handler in node.handlers:
-                    yield from self._iter_module_imports(handler.body)
-                yield from self._iter_module_imports(node.orelse)
-                yield from self._iter_module_imports(node.finalbody)
-
-    def _build_import_map(self, tree, file_path: str, star_visited: set = None) -> dict:
-        """Collect top-level imports including those inside if/try blocks. Inline imports are scoped to their function."""
-        import_map = {}
-        for node in self._iter_module_imports(tree.body):
-            import_map.update(self._resolve_import(file_path, node, star_visited=star_visited))
-        return import_map
-
-    def _collect_inline_imports(self, func_node, file_path: str) -> dict:
+    def _collect_inline_imports(self, func_node, resolver: ImportResolver) -> dict:
         """Collect all imports inside a function body, including inside nested functions."""
         inline = {}
         for child in ast.walk(func_node):
             if child is func_node:
                 continue
             if isinstance(child, (ast.Import, ast.ImportFrom)):
-                inline.update(self._resolve_import(file_path, child))
+                inline.update(resolver.resolve(child))
         return inline
 
-    def _collect_direct_imports(self, func_node, file_path: str) -> dict:
+    def _collect_direct_imports(self, func_node, resolver: ImportResolver) -> dict:
         """Collect imports declared directly in this function scope (not in nested functions)."""
         direct = {}
         for child in self._walk_current_scope(func_node):
             if isinstance(child, (ast.Import, ast.ImportFrom)):
-                direct.update(self._resolve_import(file_path, child))
+                direct.update(resolver.resolve(child))
         return direct
 
-    def _collect_nested_scope_imports(self, func_node, file_path: str) -> list:
+    def _collect_nested_scope_imports(self, func_node, resolver: ImportResolver) -> list:
         """Return (dep_file, dep_name) pairs from all imports inside the function body."""
         result = []
         for child in ast.walk(func_node):
             if child is func_node:
                 continue
             if isinstance(child, (ast.Import, ast.ImportFrom)):
-                for local_name, entry in self._resolve_import(file_path, child).items():
+                for local_name, entry in resolver.resolve(child).items():
                     dep_file, dep_name, _ = entry
                     if dep_name:
                         result.append((dep_file, dep_name))
         return result
 
-    def _collect_dynamic_imports(self, func_node, file_path: str) -> dict:
+    def _collect_dynamic_imports(self, func_node, resolver: ImportResolver) -> dict:
         """Detect importlib.import_module("literal") and import_module("literal") assignments."""
         result = {}
         for child in ast.walk(func_node):
@@ -303,7 +129,7 @@ class Parser:
                 init_path = os.path.join(module_path[:-3], "__init__.py")
                 if os.path.isfile(init_path):
                     module_path = init_path
-            if self._is_project_file(module_path):
+            if resolver._is_project_file(module_path):
                 result[local_name] = (module_path, None, child.lineno)
         return result
 
@@ -389,7 +215,7 @@ class Parser:
 
         return local_names - declared_global
 
-    def extract_dependencies(self, node, symbols: dict, import_map: dict, current_name: str, dynamic_imports: dict = None, file_path: str = None) -> list:
+    def extract_dependencies(self, node, symbols: dict, import_map: dict, current_name: str, dynamic_imports: dict = None, resolver: ImportResolver = None) -> list:
         parts = current_name.rsplit(".", 1)
         class_prefix = parts[0] + "." if len(parts) > 1 else ""
 
@@ -541,8 +367,8 @@ class Parser:
                     deps.append((imp_path, imp_name))
                     if name in called_names:
                         constructor_import_set.add((imp_path, imp_name))
-        if file_path:
-            deps += self._collect_nested_scope_imports(node, file_path)
+        if resolver:
+            deps += self._collect_nested_scope_imports(node, resolver)
         return deps, constructor_import_set
 
     def trace(self, file_path: str, name: str) -> Graph:
@@ -566,11 +392,13 @@ class Parser:
 
         if file_path not in file_cache:
             source, tree = self._load(file_path)
+            resolver = ImportResolver(file_path, source, tree)
             file_cache[file_path] = {
                 "source": source,
                 "tree": tree,
                 "symbols": self._index_symbols(source, tree, file_path),
-                "import_map": self._build_import_map(tree, file_path),
+                "import_map": resolver._build_import_map(tree),
+                "resolver": resolver,
             }
 
         symbols = file_cache[file_path]["symbols"]
@@ -601,11 +429,12 @@ class Parser:
         if not trace_deps:
             return
 
-        all_inline = self._collect_inline_imports(symbol["node"], file_path)
-        direct_inline = self._collect_direct_imports(symbol["node"], file_path)
-        dynamic_imports = self._collect_dynamic_imports(symbol["node"], file_path)
+        resolver = file_cache[file_path]["resolver"]
+        all_inline = self._collect_inline_imports(symbol["node"], resolver)
+        direct_inline = self._collect_direct_imports(symbol["node"], resolver)
+        dynamic_imports = self._collect_dynamic_imports(symbol["node"], resolver)
         effective_import_map = {**all_inline, **import_map, **direct_inline, **dynamic_imports}
-        deps, constructor_import_set = self.extract_dependencies(symbol["node"], symbols, effective_import_map, name, dynamic_imports=dynamic_imports, file_path=file_path)
+        deps, constructor_import_set = self.extract_dependencies(symbol["node"], symbols, effective_import_map, name, dynamic_imports=dynamic_imports, resolver=resolver)
 
         # Propagate external deps up the ancestor chain for correct topological ordering
         self._propagate_deps_to_ancestors(name, file_path, deps, symbols, graph)
