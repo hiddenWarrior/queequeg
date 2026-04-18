@@ -3,6 +3,7 @@ import os
 import logging
 from .graph import Graph
 from .import_resolver import ImportResolver
+from .import_collector import ImportCollector, walk_current_scope
 
 logger = logging.getLogger(__name__)
 
@@ -68,82 +69,11 @@ class Parser:
         self._index_body(source, tree.body, file_path, symbols)
         return symbols
 
-    def _collect_inline_imports(self, func_node, resolver: ImportResolver) -> dict:
-        """Collect all imports inside a function body, including inside nested functions."""
-        inline = {}
-        for child in ast.walk(func_node):
-            if child is func_node:
-                continue
-            if isinstance(child, (ast.Import, ast.ImportFrom)):
-                inline.update(resolver.resolve(child))
-        return inline
-
-    def _collect_direct_imports(self, func_node, resolver: ImportResolver) -> dict:
-        """Collect imports declared directly in this function scope (not in nested functions)."""
-        direct = {}
-        for child in self._walk_current_scope(func_node):
-            if isinstance(child, (ast.Import, ast.ImportFrom)):
-                direct.update(resolver.resolve(child))
-        return direct
-
-    def _collect_nested_scope_imports(self, func_node, resolver: ImportResolver) -> list:
-        """Return (dep_file, dep_name) pairs from all imports inside the function body."""
-        result = []
-        for child in ast.walk(func_node):
-            if child is func_node:
-                continue
-            if isinstance(child, (ast.Import, ast.ImportFrom)):
-                for local_name, entry in resolver.resolve(child).items():
-                    dep_file, dep_name, _ = entry
-                    if dep_name:
-                        result.append((dep_file, dep_name))
-        return result
-
-    def _collect_dynamic_imports(self, func_node, resolver: ImportResolver) -> dict:
-        """Detect importlib.import_module("literal") and import_module("literal") assignments."""
-        result = {}
-        for child in ast.walk(func_node):
-            if not isinstance(child, ast.Assign):
-                continue
-            if len(child.targets) != 1 or not isinstance(child.targets[0], ast.Name):
-                continue
-            call = child.value
-            if not isinstance(call, ast.Call) or not call.args:
-                continue
-            if not (isinstance(call.args[0], ast.Constant) and isinstance(call.args[0].value, str)):
-                continue
-            is_importlib = (
-                (isinstance(call.func, ast.Attribute)
-                 and call.func.attr == 'import_module'
-                 and isinstance(call.func.value, ast.Name)
-                 and call.func.value.id == 'importlib')
-                or
-                (isinstance(call.func, ast.Name) and call.func.id == 'import_module')
-            )
-            if not is_importlib:
-                continue
-            local_name = child.targets[0].id
-            module_str = call.args[0].value
-            module_path = os.path.join(os.getcwd(), module_str.replace(".", os.sep) + ".py")
-            if not os.path.isfile(module_path):
-                init_path = os.path.join(module_path[:-3], "__init__.py")
-                if os.path.isfile(init_path):
-                    module_path = init_path
-            if resolver._is_project_file(module_path):
-                result[local_name] = (module_path, None, child.lineno)
-        return result
-
-    def _walk_current_scope(self, node):
-        """Yield child nodes without recursing into nested function/class bodies."""
-        for child in ast.iter_child_nodes(node):
-            yield child
-            if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                yield from self._walk_current_scope(child)
 
     def _get_local_names(self, node) -> set:
         """Collect all names locally assigned in a function, excluding globals/nonlocals."""
         declared_global = set()
-        for child in self._walk_current_scope(node):
+        for child in walk_current_scope(node):
             if isinstance(child, ast.Global):
                 declared_global.update(child.names)
             elif isinstance(child, ast.Nonlocal):
@@ -159,7 +89,7 @@ class Parser:
             if node.args.kwarg:
                 local_names.add(node.args.kwarg.arg)
 
-        for child in self._walk_current_scope(node):
+        for child in walk_current_scope(node):
             if isinstance(child, ast.Assign):
                 for target in child.targets:
                     if isinstance(target, ast.Name):
@@ -215,7 +145,7 @@ class Parser:
 
         return local_names - declared_global
 
-    def extract_dependencies(self, node, symbols: dict, import_map: dict, current_name: str, dynamic_imports: dict = None, resolver: ImportResolver = None) -> list:
+    def extract_dependencies(self, node, symbols: dict, import_map: dict, current_name: str, dynamic_imports: dict = None) -> list:
         parts = current_name.rsplit(".", 1)
         class_prefix = parts[0] + "." if len(parts) > 1 else ""
 
@@ -367,8 +297,6 @@ class Parser:
                     deps.append((imp_path, imp_name))
                     if name in called_names:
                         constructor_import_set.add((imp_path, imp_name))
-        if resolver:
-            deps += self._collect_nested_scope_imports(node, resolver)
         return deps, constructor_import_set
 
     def trace(self, file_path: str, name: str) -> Graph:
@@ -398,7 +326,7 @@ class Parser:
                 "tree": tree,
                 "symbols": self._index_symbols(source, tree, file_path),
                 "import_map": resolver._build_import_map(tree),
-                "resolver": resolver,
+                "collector": ImportCollector(resolver),
             }
 
         symbols = file_cache[file_path]["symbols"]
@@ -429,12 +357,14 @@ class Parser:
         if not trace_deps:
             return
 
-        resolver = file_cache[file_path]["resolver"]
-        all_inline = self._collect_inline_imports(symbol["node"], resolver)
-        direct_inline = self._collect_direct_imports(symbol["node"], resolver)
-        dynamic_imports = self._collect_dynamic_imports(symbol["node"], resolver)
+        collector = file_cache[file_path]["collector"]
+        all_inline = collector.inline(symbol["node"])
+        direct_inline = collector.direct(symbol["node"])
+        dynamic_imports = collector.dynamic(symbol["node"])
+        nested_deps = collector.nested_deps(symbol["node"])
         effective_import_map = {**all_inline, **import_map, **direct_inline, **dynamic_imports}
-        deps, constructor_import_set = self.extract_dependencies(symbol["node"], symbols, effective_import_map, name, dynamic_imports=dynamic_imports, resolver=resolver)
+        deps, constructor_import_set = self.extract_dependencies(symbol["node"], symbols, effective_import_map, name, dynamic_imports=dynamic_imports)
+        deps += nested_deps
 
         # Propagate external deps up the ancestor chain for correct topological ordering
         self._propagate_deps_to_ancestors(name, file_path, deps, symbols, graph)
