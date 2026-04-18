@@ -1,6 +1,16 @@
 import ast
 
 
+def get_source(source: str, node) -> str:
+    """Extract source text for an AST node, including decorators, stripping trailing newline."""
+    lines = source.splitlines(keepends=True)
+    if hasattr(node, 'decorator_list') and node.decorator_list:
+        start = node.decorator_list[0].lineno - 1
+    else:
+        start = node.lineno - 1
+    return ''.join(lines[start:node.end_lineno]).rstrip('\n')
+
+
 def walk_current_scope(node):
     """Yield child nodes without recursing into nested function/class bodies."""
     for child in ast.iter_child_nodes(node):
