@@ -260,6 +260,19 @@ class Parser:
                 direct.update(self._resolve_import(file_path, child))
         return direct
 
+    def _collect_nested_scope_imports(self, func_node, file_path: str) -> list:
+        """Return (dep_file, dep_name) pairs from all imports inside the function body."""
+        result = []
+        for child in ast.walk(func_node):
+            if child is func_node:
+                continue
+            if isinstance(child, (ast.Import, ast.ImportFrom)):
+                for local_name, entry in self._resolve_import(file_path, child).items():
+                    dep_file, dep_name, _ = entry
+                    if dep_name:
+                        result.append((dep_file, dep_name))
+        return result
+
     def _collect_dynamic_imports(self, func_node, file_path: str) -> dict:
         """Detect importlib.import_module("literal") and import_module("literal") assignments."""
         result = {}
@@ -376,7 +389,7 @@ class Parser:
 
         return local_names - declared_global
 
-    def extract_dependencies(self, node, symbols: dict, import_map: dict, current_name: str, dynamic_imports: dict = None) -> list:
+    def extract_dependencies(self, node, symbols: dict, import_map: dict, current_name: str, dynamic_imports: dict = None, file_path: str = None) -> list:
         parts = current_name.rsplit(".", 1)
         class_prefix = parts[0] + "." if len(parts) > 1 else ""
 
@@ -528,6 +541,8 @@ class Parser:
                     deps.append((imp_path, imp_name))
                     if name in called_names:
                         constructor_import_set.add((imp_path, imp_name))
+        if file_path:
+            deps += self._collect_nested_scope_imports(node, file_path)
         return deps, constructor_import_set
 
     def trace(self, file_path: str, name: str) -> Graph:
@@ -590,7 +605,7 @@ class Parser:
         direct_inline = self._collect_direct_imports(symbol["node"], file_path)
         dynamic_imports = self._collect_dynamic_imports(symbol["node"], file_path)
         effective_import_map = {**all_inline, **import_map, **direct_inline, **dynamic_imports}
-        deps, constructor_import_set = self.extract_dependencies(symbol["node"], symbols, effective_import_map, name, dynamic_imports=dynamic_imports)
+        deps, constructor_import_set = self.extract_dependencies(symbol["node"], symbols, effective_import_map, name, dynamic_imports=dynamic_imports, file_path=file_path)
 
         # Propagate external deps up the ancestor chain for correct topological ordering
         self._propagate_deps_to_ancestors(name, file_path, deps, symbols, graph)

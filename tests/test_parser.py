@@ -570,11 +570,23 @@ class TestClassMethod(unittest.TestCase):
         self.assertIn("standalone_helper", node_names(graph))
 
 
+class TestNestedImportNameCollision(unittest.TestCase):
+    def test_inner_dep_traced_despite_name_collision(self):
+        # helper (inner's import) is dropped today due to name collision — should be traced
+        graph = Parser().trace(fixture("nested_import_name_collision.py"), "outer")
+        self.assertIn("helper", node_names(graph))
+
+    def test_outer_dep_unaffected_by_name_collision(self):
+        # shared_helper (outer's import) must still be traced correctly after the fix
+        graph = Parser().trace(fixture("nested_import_name_collision.py"), "outer")
+        self.assertIn("shared_helper", node_names(graph))
+
+
 class TestInlineImportNestedScope(unittest.TestCase):
-    def test_nested_function_inline_import_not_outer_dep(self):
-        # inner()'s inline import of 'helper as target_func' should NOT override outer's import
+    def test_nested_function_inline_import_is_traced(self):
+        # inner()'s import of 'helper' is a real dep and must appear in the graph
         graph = Parser().trace(fixture("inline_nested_scope.py"), "outer_uses_import")
-        self.assertNotIn("helper", node_names(graph))
+        self.assertIn("helper", node_names(graph))
 
     def test_outer_import_still_traced_correctly(self):
         # outer's target_func() should resolve to shared_helper (top-level import)
