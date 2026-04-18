@@ -1,14 +1,7 @@
 import ast
 import os
 from .import_resolver import ImportResolver
-
-
-def walk_current_scope(node):
-    """Yield child nodes without recursing into nested function/class bodies."""
-    for child in ast.iter_child_nodes(node):
-        yield child
-        if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            yield from walk_current_scope(child)
+from .ast_utils import walk_current_scope
 
 
 class ImportCollector:

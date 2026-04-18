@@ -3,7 +3,8 @@ import os
 import logging
 from .graph import Graph
 from .import_resolver import ImportResolver
-from .import_collector import ImportCollector, walk_current_scope
+from .import_collector import ImportCollector
+from .ast_utils import walk_current_scope, dotted_name_from_attr, comp_target_names, get_local_names
 
 logger = logging.getLogger(__name__)
 
@@ -70,81 +71,6 @@ class Parser:
         return symbols
 
 
-    def _get_local_names(self, node) -> set:
-        """Collect all names locally assigned in a function, excluding globals/nonlocals."""
-        declared_global = set()
-        for child in walk_current_scope(node):
-            if isinstance(child, ast.Global):
-                declared_global.update(child.names)
-            elif isinstance(child, ast.Nonlocal):
-                declared_global.update(child.names)
-
-        local_names = set()
-
-        if hasattr(node, 'args'):
-            for arg in node.args.args + node.args.posonlyargs + node.args.kwonlyargs:
-                local_names.add(arg.arg)
-            if node.args.vararg:
-                local_names.add(node.args.vararg.arg)
-            if node.args.kwarg:
-                local_names.add(node.args.kwarg.arg)
-
-        for child in walk_current_scope(node):
-            if isinstance(child, ast.Assign):
-                for target in child.targets:
-                    if isinstance(target, ast.Name):
-                        local_names.add(target.id)
-                    elif isinstance(target, ast.Tuple):
-                        for elt in target.elts:
-                            if isinstance(elt, ast.Name):
-                                local_names.add(elt.id)
-                            elif isinstance(elt, ast.Starred) and isinstance(elt.value, ast.Name):
-                                local_names.add(elt.value.id)
-            elif isinstance(child, ast.AnnAssign):
-                if isinstance(child.target, ast.Name):
-                    local_names.add(child.target.id)
-            elif isinstance(child, ast.AugAssign):
-                if isinstance(child.target, ast.Name):
-                    local_names.add(child.target.id)
-            elif isinstance(child, ast.NamedExpr):
-                local_names.add(child.target.id)
-            elif isinstance(child, (ast.For, ast.AsyncFor)):
-                if isinstance(child.target, ast.Name):
-                    local_names.add(child.target.id)
-                elif isinstance(child.target, ast.Tuple):
-                    for elt in child.target.elts:
-                        if isinstance(elt, ast.Name):
-                            local_names.add(elt.id)
-                        elif isinstance(elt, ast.Starred) and isinstance(elt.value, ast.Name):
-                            local_names.add(elt.value.id)
-            elif isinstance(child, ast.ExceptHandler):
-                if child.name:
-                    local_names.add(child.name)
-            elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                local_names.add(child.name)
-            elif isinstance(child, ast.ClassDef):
-                local_names.add(child.name)
-            elif isinstance(child, (ast.With, ast.AsyncWith)):
-                for item in child.items:
-                    if item.optional_vars:
-                        if isinstance(item.optional_vars, ast.Name):
-                            local_names.add(item.optional_vars.id)
-                        elif isinstance(item.optional_vars, ast.Tuple):
-                            for elt in item.optional_vars.elts:
-                                if isinstance(elt, ast.Name):
-                                    local_names.add(elt.id)
-            elif isinstance(child, ast.MatchAs):
-                if child.name:
-                    local_names.add(child.name)
-            elif isinstance(child, ast.MatchStar):
-                if child.name:
-                    local_names.add(child.name)
-            elif isinstance(child, ast.MatchMapping):
-                if child.rest:
-                    local_names.add(child.rest)
-
-        return local_names - declared_global
-
     def extract_dependencies(self, node, symbols: dict, import_map: dict, current_name: str, dynamic_imports: dict = None) -> list:
         parts = current_name.rsplit(".", 1)
         class_prefix = parts[0] + "." if len(parts) > 1 else ""
@@ -152,26 +78,6 @@ class Parser:
         names = set()
         called_names = set()  # names that appear as a direct call target (for __init__ detection)
         module_attrs: dict[str, set] = {}  # {module_local_name: {called_attrs}}
-
-        def _dotted_name_from_attr(node) -> str | None:
-            """Recursively extract a dotted name string from a nested Attribute/Name chain."""
-            if isinstance(node, ast.Name):
-                return node.id
-            if isinstance(node, ast.Attribute):
-                prefix = _dotted_name_from_attr(node.value)
-                if prefix is not None:
-                    return f"{prefix}.{node.attr}"
-            return None
-
-        def _comp_target_names(tgt) -> set:
-            if isinstance(tgt, ast.Name):
-                return {tgt.id}
-            if isinstance(tgt, (ast.Tuple, ast.List)):
-                result = set()
-                for elt in tgt.elts:
-                    result |= _comp_target_names(elt)
-                return result
-            return set()
 
         def collect(n, shadowed: set):
             for child in ast.iter_child_nodes(n):
@@ -192,7 +98,7 @@ class Parser:
                 elif isinstance(child, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
                     comp_vars = set()
                     for gen in child.generators:
-                        comp_vars |= _comp_target_names(gen.target)
+                        comp_vars |= comp_target_names(gen.target)
                     collect(child, shadowed | comp_vars)
                 elif isinstance(child, ast.Call):
                     if isinstance(child.func, ast.Name):
@@ -223,7 +129,7 @@ class Parser:
                                     names.add(obj_name)
                                     module_attrs.setdefault(obj_name, set()).add(child.func.attr)
                         elif isinstance(child.func.value, ast.Attribute):
-                            dotted = _dotted_name_from_attr(child.func.value)
+                            dotted = dotted_name_from_attr(child.func.value)
                             if dotted is not None:
                                 root = dotted.split(".")[0]
                                 if root not in shadowed:
@@ -260,7 +166,7 @@ class Parser:
         collect(node, set())
 
         names.discard(current_name)
-        local_names = self._get_local_names(node)
+        local_names = get_local_names(node)
         if dynamic_imports:
             local_names -= set(dynamic_imports)
         names -= local_names
