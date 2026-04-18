@@ -4,9 +4,9 @@ import logging
 from .graph import Graph
 from .import_resolver import ImportResolver
 from .import_collector import ImportCollector
-from .ast_utils import walk_current_scope, get_source
 from .dependency_extractor import DependencyExtractor
 from .class_reconstructor import ClassReconstructor
+from .symbol_indexer import SymbolIndexer
 
 logger = logging.getLogger(__name__)
 
@@ -18,57 +18,12 @@ class Parser:
         tree = ast.parse(source)
         return source, tree
 
-    def _index_body(self, source: str, body, file_path: str, symbols: dict, prefix: str = ""):
-        for node in body:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                name = f"{prefix}{node.name}"
-                symbols[name] = {
-                    "node": node,
-                    "code": get_source(source, node),
-                    "type": "function",
-                    "file_path": file_path,
-                    "class_prefix": prefix,
-                }
-            elif isinstance(node, ast.ClassDef):
-                name = f"{prefix}{node.name}"
-                symbols[name] = {
-                    "node": node,
-                    "code": get_source(source, node),
-                    "type": "class",
-                    "file_path": file_path,
-                    "class_prefix": prefix,
-                }
-                self._index_body(source, node.body, file_path, symbols, prefix=f"{name}.")
-            elif isinstance(node, ast.Assign) and not prefix:
-                for target in node.targets:
-                    if isinstance(target, ast.Name):
-                        symbols[target.id] = {
-                            "node": node,
-                            "code": get_source(source, node),
-                            "type": "variable",
-                            "file_path": file_path,
-                            "class_prefix": "",
-                        }
-            elif isinstance(node, ast.AnnAssign) and not prefix:
-                if isinstance(node.target, ast.Name):
-                    symbols[node.target.id] = {
-                        "node": node,
-                        "code": get_source(source, node),
-                        "type": "variable",
-                        "file_path": file_path,
-                        "class_prefix": "",
-                    }
-
-    def _index_symbols(self, source: str, tree, file_path: str) -> dict:
-        symbols = {}
-        self._index_body(source, tree.body, file_path, symbols)
-        return symbols
 
 
     def trace(self, file_path: str, name: str) -> Graph:
         file_path = os.path.abspath(file_path)
         source, tree = self._load(file_path)
-        symbols = self._index_symbols(source, tree, file_path)
+        symbols = SymbolIndexer().index(source, tree, file_path)
 
         if name not in symbols:
             raise ValueError(f"'{name}' not found in '{file_path}'")
@@ -90,7 +45,7 @@ class Parser:
             file_cache[file_path] = {
                 "source": source,
                 "tree": tree,
-                "symbols": self._index_symbols(source, tree, file_path),
+                "symbols": SymbolIndexer().index(source, tree, file_path),
                 "import_map": resolver._build_import_map(tree),
                 "collector": ImportCollector(resolver),
             }
