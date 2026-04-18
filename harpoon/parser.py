@@ -4,7 +4,8 @@ import logging
 from .graph import Graph
 from .import_resolver import ImportResolver
 from .import_collector import ImportCollector
-from .ast_utils import walk_current_scope, dotted_name_from_attr, comp_target_names, get_local_names
+from .ast_utils import walk_current_scope
+from .dependency_extractor import DependencyExtractor
 
 logger = logging.getLogger(__name__)
 
@@ -71,140 +72,6 @@ class Parser:
         return symbols
 
 
-    def extract_dependencies(self, node, symbols: dict, import_map: dict, current_name: str, dynamic_imports: dict = None) -> list:
-        parts = current_name.rsplit(".", 1)
-        class_prefix = parts[0] + "." if len(parts) > 1 else ""
-
-        names = set()
-        called_names = set()  # names that appear as a direct call target (for __init__ detection)
-        module_attrs: dict[str, set] = {}  # {module_local_name: {called_attrs}}
-
-        def collect(n, shadowed: set):
-            for child in ast.iter_child_nodes(n):
-                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    fn_params = {a.arg for a in child.args.args + child.args.posonlyargs + child.args.kwonlyargs}
-                    if child.args.vararg:
-                        fn_params.add(child.args.vararg.arg)
-                    if child.args.kwarg:
-                        fn_params.add(child.args.kwarg.arg)
-                    collect(child, shadowed | fn_params)
-                elif isinstance(child, ast.Lambda):
-                    lam_params = {a.arg for a in child.args.args + child.args.posonlyargs + child.args.kwonlyargs}
-                    if child.args.vararg:
-                        lam_params.add(child.args.vararg.arg)
-                    if child.args.kwarg:
-                        lam_params.add(child.args.kwarg.arg)
-                    collect(child, shadowed | lam_params)
-                elif isinstance(child, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
-                    comp_vars = set()
-                    for gen in child.generators:
-                        comp_vars |= comp_target_names(gen.target)
-                    collect(child, shadowed | comp_vars)
-                elif isinstance(child, ast.Call):
-                    if isinstance(child.func, ast.Name):
-                        func_name = child.func.id
-                        if func_name not in shadowed:
-                            if (func_name == 'getattr'
-                                    and len(child.args) >= 2
-                                    and isinstance(child.args[1], ast.Constant)
-                                    and isinstance(child.args[1].value, str)):
-                                obj_node = child.args[0]
-                                attr_name = child.args[1].value
-                                if isinstance(obj_node, ast.Name) and obj_node.id not in shadowed:
-                                    if obj_node.id in ('self', 'cls') and class_prefix:
-                                        names.add(f"{class_prefix}{attr_name}")
-                                    else:
-                                        names.add(obj_node.id)
-                                        module_attrs.setdefault(obj_node.id, set()).add(attr_name)
-                            else:
-                                names.add(func_name)
-                                called_names.add(func_name)
-                    elif isinstance(child.func, ast.Attribute):
-                        if isinstance(child.func.value, ast.Name):
-                            obj_name = child.func.value.id
-                            if obj_name not in shadowed:
-                                if obj_name in ("self", "cls") and class_prefix:
-                                    names.add(f"{class_prefix}{child.func.attr}")
-                                else:
-                                    names.add(obj_name)
-                                    module_attrs.setdefault(obj_name, set()).add(child.func.attr)
-                        elif isinstance(child.func.value, ast.Attribute):
-                            dotted = dotted_name_from_attr(child.func.value)
-                            if dotted is not None:
-                                root = dotted.split(".")[0]
-                                if root not in shadowed:
-                                    names.add(dotted)
-                                    module_attrs.setdefault(dotted, set()).add(child.func.attr)
-                        elif (isinstance(child.func.value, ast.Call)
-                              and isinstance(child.func.value.func, ast.Name)
-                              and child.func.value.func.id == 'super'
-                              and class_prefix):
-                            method_name = child.func.attr
-                            class_name = class_prefix.rstrip('.')
-                            if class_name in symbols:
-                                for base in symbols[class_name]['node'].bases:
-                                    if isinstance(base, ast.Name):
-                                        names.add(f"{base.id}.{method_name}")
-                    collect(child, shadowed)
-                elif isinstance(child, ast.Attribute):
-                    if isinstance(child.value, ast.Name):
-                        obj_name = child.value.id
-                        if obj_name not in shadowed:
-                            if obj_name in ("self", "cls") and class_prefix:
-                                names.add(f"{class_prefix}{child.attr}")
-                            else:
-                                names.add(obj_name)
-                                module_attrs.setdefault(obj_name, set()).add(child.attr)
-                    else:
-                        collect(child, shadowed)
-                elif isinstance(child, ast.Name):
-                    if child.id not in shadowed:
-                        names.add(child.id)
-                else:
-                    collect(child, shadowed)
-
-        collect(node, set())
-
-        names.discard(current_name)
-        local_names = get_local_names(node)
-        if dynamic_imports:
-            local_names -= set(dynamic_imports)
-        names -= local_names
-
-        deps = []
-        constructor_import_set = set()  # (imp_path, imp_name) for import calls that may be constructors
-        for name in names:
-            in_symbols = name in symbols
-            in_imports = name in import_map
-            if in_symbols and in_imports:
-                sym_lineno = symbols[name]["node"].lineno
-                imp_lineno = import_map[name][2]
-                if sym_lineno >= imp_lineno:
-                    deps.append((symbols[name]["file_path"], name))
-                else:
-                    imp_path, imp_name, _ = import_map[name]
-                    if imp_name is None:
-                        for attr in module_attrs.get(name, []):
-                            deps.append((imp_path, attr))
-                    else:
-                        deps.append((imp_path, imp_name))
-            elif in_symbols:
-                deps.append((symbols[name]["file_path"], name))
-                if name in called_names and symbols[name]["type"] == "class":
-                    init_name = f"{name}.__init__"
-                    if init_name in symbols:
-                        deps.append((symbols[name]["file_path"], init_name))
-            elif in_imports:
-                imp_path, imp_name, _ = import_map[name]
-                if imp_name is None:
-                    for attr in module_attrs.get(name, []):
-                        deps.append((imp_path, attr))
-                else:
-                    deps.append((imp_path, imp_name))
-                    if name in called_names:
-                        constructor_import_set.add((imp_path, imp_name))
-        return deps, constructor_import_set
-
     def trace(self, file_path: str, name: str) -> Graph:
         file_path = os.path.abspath(file_path)
         source, tree = self._load(file_path)
@@ -269,7 +136,7 @@ class Parser:
         dynamic_imports = collector.dynamic(symbol["node"])
         nested_deps = collector.nested_deps(symbol["node"])
         effective_import_map = {**all_inline, **import_map, **direct_inline, **dynamic_imports}
-        deps, constructor_import_set = self.extract_dependencies(symbol["node"], symbols, effective_import_map, name, dynamic_imports=dynamic_imports)
+        deps, constructor_import_set = DependencyExtractor(symbols, effective_import_map, name, dynamic_imports=dynamic_imports).extract(symbol["node"])
         deps += nested_deps
 
         # Propagate external deps up the ancestor chain for correct topological ordering
