@@ -8,7 +8,7 @@ A static analysis MCP server for Python codebases. Queequeg gives AI assistants 
 
 When an AI assistant needs to understand a function, it typically reads the file, finds imports, reads those files, finds more imports, and so on. It loses context, misses things, and wastes tokens.
 
-Harpoon does that traversal statically using AST analysis and returns a single structured result — the full dependency graph, assembled and ready to use.
+Queequeg does that traversal statically using AST analysis and returns a single structured result — the full dependency graph, assembled and ready to use.
 
 ## Installation
 
@@ -124,7 +124,7 @@ Add this to your project's `CLAUDE.md` to instruct Claude when to use queequeg:
 ```markdown
 # Tools
 
-## Harpoon MCP Tools
+## Queequeg MCP Tools
 
 Use queequeg for understanding code structure, but only in specific cases:
 - `mcp__queequeg__trace_code` — get the full code of a symbol and all its dependencies
