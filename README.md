@@ -1,6 +1,8 @@
 # Queequeg
 
-A static analysis MCP server for Python codebases. Harpoon gives AI assistants structured code context by tracing function and class dependencies across files — so instead of opening ten files to understand one function, the assistant calls one tool and gets everything it needs.
+![Queequeg logo](https://raw.githubusercontent.com/hiddenWarrior/queequeg/main/assets/logo.png)
+
+A static analysis MCP server for Python codebases. Queequeg gives AI assistants structured code context by tracing function and class dependencies across files — so instead of opening ten files to understand one function, the assistant calls one tool and gets everything it needs.
 
 ## Why
 
