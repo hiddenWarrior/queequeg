@@ -7,7 +7,7 @@ include = ["queequeg*"]
 
 [project]
 name = "queequeg"
-version = "0.1.0"
+version = "0.1.1"
 description = "A static analysis MCP server that traces Python function and class dependencies across files for AI assistants."
 readme = "README.md"
 requires-python = ">=3.10"
