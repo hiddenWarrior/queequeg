@@ -20,3 +20,4 @@ env/
 # IDE
 .idea/
 .vscode/
+.aider*

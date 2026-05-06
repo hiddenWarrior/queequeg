@@ -4,6 +4,7 @@ import unittest
 from harpoon.parser import Parser
 from harpoon.serializers.code import CodeSerializer
 from harpoon.serializers.json import JsonSerializer
+from harpoon.serializers.callers import CallersSerializer
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
 
@@ -534,6 +535,75 @@ class TestJsonSerializerMethods(unittest.TestCase):
         self.assertIn("helper", by_name)
         self.assertEqual(by_name["Outer.Inner"]["type"], "class")
         self.assertEqual(by_name["Outer.Inner.method"]["type"], "function")
+
+
+class TestCallersSerializer(unittest.TestCase):
+    def _parse(self, fixture_name, name):
+        graph = Parser().trace_callers(fixture(fixture_name), name, search_path=FIXTURES)
+        return json.loads(CallersSerializer().translate(graph))
+
+    def test_output_is_valid_json(self):
+        result = self._parse("callee.py", "callee_func")
+        self.assertIsInstance(result, dict)
+
+    def test_target_is_in_output(self):
+        result = self._parse("callee.py", "callee_func")
+        keys = [k.split("::")[-1] for k in result]
+        self.assertIn("callee_func", keys)
+
+    def test_nodes_have_callers_field_not_dependencies(self):
+        result = self._parse("callee.py", "callee_func")
+        for node in result.values():
+            self.assertIn("callers", node)
+            self.assertNotIn("dependencies", node)
+
+    def test_target_has_direct_caller(self):
+        result = self._parse("callee.py", "callee_func")
+        node = next(v for k, v in result.items() if k.endswith("::callee_func"))
+        caller_names = [c.split("::")[-1] for c in node["callers"]]
+        self.assertIn("calls_callee", caller_names)
+
+    def test_target_callers_does_not_include_non_caller(self):
+        result = self._parse("callee.py", "callee_func")
+        node = next(v for k, v in result.items() if k.endswith("::callee_func"))
+        caller_names = [c.split("::")[-1] for c in node["callers"]]
+        self.assertNotIn("does_not_call_callee", caller_names)
+
+    def test_direct_caller_has_transitive_caller(self):
+        result = self._parse("callee.py", "callee_func")
+        node = next(v for k, v in result.items() if k.endswith("::calls_callee"))
+        caller_names = [c.split("::")[-1] for c in node["callers"]]
+        self.assertIn("calls_direct_caller", caller_names)
+
+    def test_top_level_caller_has_empty_callers(self):
+        result = self._parse("callee.py", "callee_func")
+        node = next(v for k, v in result.items() if k.endswith("::calls_direct_caller"))
+        self.assertEqual(node["callers"], [])
+
+    def test_no_callers_returns_only_target(self):
+        result = self._parse("callee.py", "unrelated_func")
+        keys = [k.split("::")[-1] for k in result]
+        self.assertEqual(keys, ["unrelated_func"])
+        node = next(v for v in result.values())
+        self.assertEqual(node["callers"], [])
+
+    def test_node_has_type(self):
+        result = self._parse("callee.py", "callee_func")
+        node = next(v for k, v in result.items() if k.endswith("::callee_func"))
+        self.assertEqual(node["type"], "function")
+
+    def test_node_has_file_path(self):
+        result = self._parse("callee.py", "callee_func")
+        node = next(v for k, v in result.items() if k.endswith("::callee_func"))
+        self.assertIn("callee.py", node["file_path"])
+
+    def test_full_output(self):
+        result = self._parse("callee.py", "callee_func")
+        by_name = {k.split("::")[-1]: v for k, v in result.items()}
+        self.assertEqual(set(by_name.keys()), {"callee_func", "calls_callee", "calls_direct_caller"})
+        self.assertIn("calls_callee", [c.split("::")[-1] for c in by_name["callee_func"]["callers"]])
+        self.assertIn("calls_direct_caller", [c.split("::")[-1] for c in by_name["calls_callee"]["callers"]])
+        self.assertEqual(by_name["calls_direct_caller"]["callers"], [])
 
 
 if __name__ == "__main__":

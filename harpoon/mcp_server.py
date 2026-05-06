@@ -2,6 +2,7 @@ from mcp.server.fastmcp import FastMCP
 from .parser import Parser
 from .serializers.code import CodeSerializer
 from .serializers.json import JsonSerializer
+from .serializers.callers import CallersSerializer
 
 mcp = FastMCP("harpoon")
 
@@ -49,6 +50,29 @@ def trace_graph(file_path: str, name: str) -> str:
     """
     graph = Parser().trace(file_path, name)
     return JsonSerializer().translate(graph)
+
+
+@mcp.tool()
+def trace_callers(file_path: str, name: str, search_path: str = None) -> str:
+    """Use this tool to find all functions and methods that call a specific Python symbol.
+
+    Scans all Python files under search_path (defaults to the directory of file_path) and
+    returns a JSON graph of every function that directly or transitively calls the target.
+    Edges point from caller to callee, so you can trace the full call chain leading to the target.
+
+    Useful for: understanding the impact of changing a function, finding all entry points that
+    reach a specific piece of code, or answering "who calls this?".
+
+    Use dotted notation for methods and nested classes (e.g. MyClass.method, Outer.Inner.method).
+
+    Args:
+        file_path: Absolute or relative path to the Python source file containing the target.
+        name: Name of the function, method, or class to find callers for.
+        search_path: Directory to scan for callers. Defaults to the directory of file_path.
+                     Pass a broader path (e.g. the project root) to find callers across the whole codebase.
+    """
+    graph = Parser().trace_callers(file_path, name, search_path)
+    return CallersSerializer().translate(graph)
 
 
 def main():

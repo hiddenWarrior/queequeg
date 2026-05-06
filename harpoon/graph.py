@@ -45,5 +45,8 @@ class Graph:
     def neighbors(self, name: str) -> list:
         return list(self._graph.successors(name))
 
+    def predecessors(self, name: str) -> list:
+        return list(self._graph.predecessors(name))
+
     def has_node(self, name: str) -> bool:
         return self._graph.has_node(name)
