@@ -1,4 +1,4 @@
-# queequeg
+# Queequeg
 
 A static analysis MCP server for Python codebases. Harpoon gives AI assistants structured code context by tracing function and class dependencies across files — so instead of opening ten files to understand one function, the assistant calls one tool and gets everything it needs.
 
