@@ -30,9 +30,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/hiddenwarrior/queequeg"
-Repository = "https://github.com/hiddenwarrior/queequeg"
-Issues = "https://github.com/hiddenwarrior/queequeg/issues"
+Homepage = "https://github.com/hiddenWarrior/queequeg"
+Repository = "https://github.com/hiddenWarrior/queequeg"
+Issues = "https://github.com/hiddenWarrior/queequeg/issues"
 
 [project.optional-dependencies]
 dev = [
