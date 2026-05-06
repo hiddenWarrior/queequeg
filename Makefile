@@ -11,7 +11,7 @@ build:
 	uv build
 
 serve:
-	uv run harpoon-mcp
+	uv run queequeg-mcp
 
 aider:
 	uvx --from aider-chat aider

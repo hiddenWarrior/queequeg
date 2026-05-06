@@ -4,7 +4,7 @@ from .serializers.code import CodeSerializer
 from .serializers.json import JsonSerializer
 from .serializers.callers import CallersSerializer
 
-mcp = FastMCP("harpoon")
+mcp = FastMCP("queequeg")
 
 
 @mcp.tool()

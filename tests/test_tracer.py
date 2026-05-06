@@ -1,8 +1,8 @@
 import ast
 import os
 import unittest
-from harpoon.tracer import Tracer
-from harpoon.graph import Graph
+from queequeg.tracer import Tracer
+from queequeg.graph import Graph
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
 

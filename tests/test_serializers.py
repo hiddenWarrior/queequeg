@@ -1,10 +1,10 @@
 import os
 import json
 import unittest
-from harpoon.parser import Parser
-from harpoon.serializers.code import CodeSerializer
-from harpoon.serializers.json import JsonSerializer
-from harpoon.serializers.callers import CallersSerializer
+from queequeg.parser import Parser
+from queequeg.serializers.code import CodeSerializer
+from queequeg.serializers.json import JsonSerializer
+from queequeg.serializers.callers import CallersSerializer
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
 

@@ -1,6 +1,6 @@
 import ast
 import unittest
-from harpoon.ast_utils import (
+from queequeg.ast_utils import (
     walk_current_scope,
     dotted_name_from_attr,
     comp_target_names,

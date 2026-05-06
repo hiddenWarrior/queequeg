@@ -1,8 +1,8 @@
 import ast
 import unittest
-from harpoon.class_reconstructor import ClassReconstructor
-from harpoon.graph import Graph
-from harpoon.ast_utils import get_source
+from queequeg.class_reconstructor import ClassReconstructor
+from queequeg.graph import Graph
+from queequeg.ast_utils import get_source
 
 FILE = "/test.py"
 

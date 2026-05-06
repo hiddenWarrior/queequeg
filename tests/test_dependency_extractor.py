@@ -1,7 +1,7 @@
 import ast
 import os
 import unittest
-from harpoon.dependency_extractor import DependencyExtractor
+from queequeg.dependency_extractor import DependencyExtractor
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
 

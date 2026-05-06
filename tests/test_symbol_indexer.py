@@ -1,6 +1,6 @@
 import ast
 import unittest
-from harpoon.symbol_indexer import SymbolIndexer
+from queequeg.symbol_indexer import SymbolIndexer
 
 FILE = "/test.py"
 

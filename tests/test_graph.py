@@ -1,5 +1,5 @@
 import unittest
-from harpoon.graph import Graph
+from queequeg.graph import Graph
 
 
 class TestCreateNode(unittest.TestCase):

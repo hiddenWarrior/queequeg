@@ -1,6 +1,6 @@
 import os
 import unittest
-from harpoon.parser import Parser
+from queequeg.parser import Parser
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
 
@@ -252,19 +252,19 @@ class TestAsync(unittest.TestCase):
 class TestCodeGeneration(unittest.TestCase):
     def test_method_code_in_output(self):
         graph = Parser().trace(fixture("classes.py"), "Animal.speak")
-        from harpoon.serializers.code import CodeSerializer
+        from queequeg.serializers.code import CodeSerializer
         result = CodeSerializer().translate(graph)
         self.assertIn("def speak", result)
 
     def test_class_appears_in_output(self):
         graph = Parser().trace(fixture("classes.py"), "Animal.speak")
-        from harpoon.serializers.code import CodeSerializer
+        from queequeg.serializers.code import CodeSerializer
         result = CodeSerializer().translate(graph)
         self.assertIn("class Animal", result)
 
     def test_unrelated_sibling_not_in_output(self):
         graph = Parser().trace(fixture("classes.py"), "Dog.fetch")
-        from harpoon.serializers.code import CodeSerializer
+        from queequeg.serializers.code import CodeSerializer
         result = CodeSerializer().translate(graph)
         self.assertNotIn("def sit", result)
 
@@ -302,7 +302,7 @@ class TestDeepChain(unittest.TestCase):
         self.assertIn("d", names)
 
     def test_chain_order_in_output(self):
-        from harpoon.serializers.code import CodeSerializer
+        from queequeg.serializers.code import CodeSerializer
         graph = Parser().trace(fixture("deep_chain.py"), "a")
         result = CodeSerializer().translate(graph)
         self.assertLess(result.index("def d"), result.index("def c"))
@@ -611,7 +611,7 @@ class TestCompVarShadow(unittest.TestCase):
 class TestConstructorInitOrder(unittest.TestCase):
     def test_imported_init_ordered_before_caller_class(self):
         # Builder.build calls MyService() — MyService.__init__ should appear before Builder
-        from harpoon.serializers.code import CodeSerializer
+        from queequeg.serializers.code import CodeSerializer
         graph = Parser().trace(fixture("class_init_order.py"), "Builder.build")
         result = CodeSerializer().translate(graph)
         self.assertIn("def __init__", result)

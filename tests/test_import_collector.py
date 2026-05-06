@@ -1,8 +1,8 @@
 import ast
 import os
 import unittest
-from harpoon.import_resolver import ImportResolver
-from harpoon.import_collector import ImportCollector
+from queequeg.import_resolver import ImportResolver
+from queequeg.import_collector import ImportCollector
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
 

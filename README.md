@@ -11,15 +11,15 @@ Harpoon does that traversal statically using AST analysis and returns a single s
 ## Installation
 
 ```bash
-pip install harpoon
+pip install queequeg
 # or
-uv add harpoon
+uv add queequeg
 ```
 
 ## Setup with Claude Code
 
 ```bash
-claude mcp add harpoon --scope user -- uvx --from harpoon harpoon-mcp
+claude mcp add queequeg --scope user -- uvx --from queequeg queequeg-mcp
 ```
 
 Then add a `CLAUDE.md` to your project (see [CLAUDE.md example](#claudemd-example) below) to tell Claude when and how to use it.
@@ -117,35 +117,35 @@ Returns a JSON graph of every function that directly or transitively calls a giv
 
 ## CLAUDE.md example
 
-Add this to your project's `CLAUDE.md` to instruct Claude when to use harpoon:
+Add this to your project's `CLAUDE.md` to instruct Claude when to use queequeg:
 
 ```markdown
 # Tools
 
 ## Harpoon MCP Tools
 
-Use harpoon for understanding code structure, but only in specific cases:
-- `mcp__harpoon__trace_code` — get the full code of a symbol and all its dependencies
-- `mcp__harpoon__trace_graph` — get a structural overview of a symbol's dependency graph
-- `mcp__harpoon__trace_callers` — find all functions that call a given symbol (impact analysis)
+Use queequeg for understanding code structure, but only in specific cases:
+- `mcp__queequeg__trace_code` — get the full code of a symbol and all its dependencies
+- `mcp__queequeg__trace_graph` — get a structural overview of a symbol's dependency graph
+- `mcp__queequeg__trace_callers` — find all functions that call a given symbol (impact analysis)
 
-### When harpoon is useful:
+### When queequeg is useful:
 - Function has dependencies scattered across **multiple different files**
 - You want to pull a small relevant portion of a large file without guessing offset/limit ranges
 - Understanding a deep dependency chain (e.g., function A calls B calls C calls D across different modules)
 - Before modifying a function — use trace_callers to find everything that will be affected
 
-### When harpoon is NOT useful:
+### When queequeg is NOT useful:
 - All related functions are in the **same file and nearby** (just read the file)
 - Small files where reading the whole thing is faster than using a tool
 - You need file context, comments, or surrounding code for understanding
 
-### Limitations (apply to all harpoon tools):
+### Limitations (apply to all queequeg tools):
 - Only resolves **static** dependencies — dynamic dispatch, `getattr(obj, name)()`, callbacks stored in dicts or lists, and `__call__` usage will be missed
 - Does not cross package boundaries — third-party library internals are not traced
 - String annotations (e.g. `def foo(x: "MyModel")`) are not resolved
 - `importlib.import_module()` with a dynamic string argument cannot be traced
 
 ### Special case:
-If anything requires tree-sitter analysis, use harpoon — it has tree-sitter built in and can be extended for custom analysis needs.
+If anything requires tree-sitter analysis, use queequeg — it has tree-sitter built in and can be extended for custom analysis needs.
 ```

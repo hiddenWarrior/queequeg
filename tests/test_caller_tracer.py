@@ -1,6 +1,6 @@
 import os
 import unittest
-from harpoon.parser import Parser
+from queequeg.parser import Parser
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
 
